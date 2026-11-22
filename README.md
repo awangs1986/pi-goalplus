@@ -6,8 +6,8 @@ evidence before finishing. It runs in the existing Pi session and workspace.
 
 ## Install
 
-Use Node.js 22.19 or newer and a supported Pi version. Pi 1.6.0 is the primary
-target. Install from the GitHub repository with Pi's native package manager:
+Use Node.js 22.19 or newer. The supported Pi lines are 1.6.x and 1.4.x.
+The native package checks use Pi 1.6.0 and 1.4.0. Install from the GitHub repository with Pi's native package manager:
 
 ```sh
 pi install git:github.com/awangs1986/pi-goalplus
@@ -49,6 +49,9 @@ successive runs. RPC clients receive the standard `setWidget` and `notify`
 extension UI frames. Record which native Pi session to reopen if you stop the
 process. A Goal can continue when Pi can confirm the previous work settled.
 An uncertain in-flight run needs review before you explicitly resume it.
+Use one live Pi process per session. Third-party asynchronous work that returns
+control to Pi before it finishes needs its own completion signal or a paused
+Goal.
 
 ## Evidence and compaction
 
@@ -61,8 +64,12 @@ successfully before completion is final.
 Native Pi owns compaction. GoalPlus keeps the Goal in separate native session
 entries, so the next turn retrieves the same confirmed requirements even if
 prior model context was condensed. Tool results remain in Pi's native history.
-The extension checks receipt identity and coverage. The model still judges
-whether the observed evidence is relevant and sufficient.
+Arbitrary shell and other potentially mutating tools make previous workspace
+evidence stale. For several shell verifications, run them together and capture
+each outcome in one result, then add read-only checks as needed. Final
+acceptance uses current-run receipts. The extension validates receipt identity
+and criterion coverage. The model judges whether the evidence is relevant and
+sufficient.
 
 ## Develop
 

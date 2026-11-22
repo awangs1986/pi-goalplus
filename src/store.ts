@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createLocalAuthority } from "./local-authority.js";
 import type { Criterion, Goal, GoalDefinition, GoalStore } from "./types.js";
 
 const ENTRY_TYPE = "pi-goalplus:state";
@@ -18,6 +19,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function wholeNumber(value: unknown, minimum: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
+}
+
+function digest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 function text(value: unknown, label: string, maximum: number): string {
@@ -85,17 +90,31 @@ function decodeSnapshot(value: unknown): Goal | undefined {
   if (!isRecord(value) || value.schema !== 1) throw new GoalStateError();
   if (value.goal === null) return undefined;
   const goal = value.goal;
-  if (!isRecord(goal) || goal.schema !== 1 || typeof goal.id !== "string" || !goal.id ||
+  if (!isRecord(goal) || goal.schema !== 1 || typeof goal.id !== "string" || !goal.id || goal.id.length > 128 ||
       !wholeNumber(goal.revision, 1) || typeof goal.status !== "string" || !statuses.has(goal.status) ||
       !wholeNumber(goal.tokensUsed, 0) || !wholeNumber(goal.noProgress, 0) || !Array.isArray(goal.evidence)) {
     throw new GoalStateError();
   }
-  for (const key of ["stage", "next", "reason", "lastSettledId", "auditedRunId", "completionRunId"]) {
+  if (goal.needsReview !== undefined ||
+      (goal.consecutiveFailures !== undefined && !wholeNumber(goal.consecutiveFailures, 0)) ||
+      (goal.auditPending !== undefined && typeof goal.auditPending !== "boolean")) {
+    throw new GoalStateError();
+  }
+  for (const key of ["progressSeen", "activitySeen"]) {
+    const keys = goal[key];
+    if (keys !== undefined && (!Array.isArray(keys) || keys.length > 128 ||
+        keys.some(key => !digest(key)))) {
+      throw new GoalStateError();
+    }
+  }
+  for (const key of ["stage", "next", "reason", "ownerSessionId", "lastSettledId", "auditedRunId", "completionRunId"]) {
     if (goal[key] !== undefined && typeof goal[key] !== "string") throw new GoalStateError();
   }
   if (goal.dispatch !== undefined && (!isRecord(goal.dispatch) ||
     typeof goal.dispatch.id !== "string" || !goal.dispatch.id || !wholeNumber(goal.dispatch.revision, 1) ||
-    (goal.dispatch.phase !== "queued" && goal.dispatch.phase !== "running"))) {
+    (goal.dispatch.phase !== "queued" && goal.dispatch.phase !== "running") ||
+    (goal.dispatch.baseLeafId !== undefined && goal.dispatch.baseLeafId !== null &&
+      (typeof goal.dispatch.baseLeafId !== "string" || !goal.dispatch.baseLeafId)))) {
     throw new GoalStateError();
   }
   let definition: GoalDefinition;
@@ -109,29 +128,71 @@ function decodeSnapshot(value: unknown): Goal | undefined {
     if (!isRecord(evidence) || typeof evidence.criterionId !== "string" || !ids.delete(evidence.criterionId) ||
         (evidence.verdict !== "pass" && evidence.verdict !== "fail") ||
         typeof evidence.source !== "string" || !evidence.source.trim() ||
-        typeof evidence.observed !== "string" || !evidence.observed.trim()) {
+        typeof evidence.observed !== "string" || !evidence.observed.trim() ||
+        (evidence.fingerprint !== undefined && !digest(evidence.fingerprint))) {
       throw new GoalStateError();
     }
   }
+  if (goal.constraintReviews !== undefined) {
+    const indexes = new Set(definition.constraints.map((_item, index) => index + 1));
+    if (!Array.isArray(goal.constraintReviews) || goal.constraintReviews.some(item =>
+      !isRecord(item) || !wholeNumber(item.index, 1) || !indexes.delete(item.index) ||
+      (item.state !== "pass" && item.state !== "fail" && item.state !== "unknown") ||
+      typeof item.evidence !== "string" || !item.evidence.trim() ||
+      (item.source !== undefined || item.fingerprint !== undefined) &&
+        (typeof item.source !== "string" || !item.source.trim() || !digest(item.fingerprint))
+    )) throw new GoalStateError();
+  }
   return { ...goal, ...definition } as Goal;
+}
+
+function unconfirmed(goal: Goal): Goal {
+  const { objective, criteria, constraints, budgetTokens, id, revision } = goal;
+  return {
+    schema: 1, id, revision, objective, criteria, constraints, budgetTokens,
+    status: "paused", needsReview: true, evidence: [], tokensUsed: 0, noProgress: 0,
+    reason: "This Goal has no verified local origin. Review it with /goal resume before starting work."
+  };
 }
 
 export function createGoalStore(
   pi: ExtensionAPI,
   onChange?: (ctx: ExtensionContext, goal: Goal | undefined) => void
 ): GoalStore {
+  const authority = createLocalAuthority();
+
+  const read = (ctx: ExtensionContext): Goal | undefined => {
+    const branch = ctx.sessionManager.getBranch();
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const entry = branch[index];
+      if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
+      const goal = decodeSnapshot(entry.data);
+      if (!goal || !isRecord(entry.data)) return undefined;
+      return authority.verify(ctx, entry.parentId, entry.data.goal, entry.data.origin) ? goal : unconfirmed(goal);
+    }
+    return undefined;
+  };
+
   return {
-    read(ctx) {
-      const branch = ctx.sessionManager.getBranch();
-      for (let index = branch.length - 1; index >= 0; index--) {
-        const entry = branch[index];
-        if (entry.type === "custom" && entry.customType === ENTRY_TYPE) return decodeSnapshot(entry.data);
+    read,
+    write(ctx, goal, authorization) {
+      if (goal === null) {
+        pi.appendEntry(ENTRY_TYPE, { schema: 1, goal });
+        onChange?.(ctx, undefined);
+        return;
       }
-      return undefined;
-    },
-    write(ctx, goal) {
-      pi.appendEntry(ENTRY_TYPE, { schema: 1, goal });
-      onChange?.(ctx, goal ?? undefined);
+      const confirmed = authorization === "user-confirmed";
+      if (!confirmed) {
+        const previous = read(ctx);
+        if (!previous || previous.needsReview || previous.id !== goal.id || previous.revision !== goal.revision) {
+          throw Error("Goal changes require a verified local Goal or a fresh user confirmation.");
+        }
+      }
+      const snapshot = { schema: 1, goal };
+      decodeSnapshot(snapshot);
+      const origin = authority.sign(ctx, ctx.sessionManager.getLeafId(), goal, confirmed);
+      pi.appendEntry(ENTRY_TYPE, { ...snapshot, origin });
+      onChange?.(ctx, goal);
     }
   };
 }

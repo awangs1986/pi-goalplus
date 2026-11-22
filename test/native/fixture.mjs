@@ -31,16 +31,17 @@ export async function modelServer(onRequest) {
         response.end(JSON.stringify({ error: { message: reply.message ?? "Fixture error" } }));
         return;
       }
-      const tool = reply.tool;
-      const delta = tool
-        ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + id, type: "function", function: {
-            name: tool, arguments: JSON.stringify(reply.args ?? {}),
-          } }] }
+      const toolCalls = reply.tools ?? (reply.tool ? [reply] : []);
+      const delta = toolCalls.length
+        ? { role: "assistant", tool_calls: toolCalls.map((call, index) => ({
+            index, id: "call_" + id + "_" + index, type: "function",
+            function: { name: call.tool, arguments: JSON.stringify(call.args ?? {}) },
+          })) }
         : { role: "assistant", content: reply.text ?? "Fixture completed this turn." };
       const usage = reply.usage ?? 10;
       response.writeHead(200, { "content-type": "text/event-stream" });
       for (const choice of [{ index: 0, delta, finish_reason: null }, {
-        index: 0, delta: {}, finish_reason: tool ? "tool_calls" : "stop",
+        index: 0, delta: {}, finish_reason: toolCalls.length ? "tool_calls" : "stop",
       }]) {
         response.write("data: " + JSON.stringify({
           id: "fixture-" + id, object: "chat.completion.chunk", created: 1, model: "fixture", choices: [choice],
@@ -78,14 +79,14 @@ export function lastTool(body) {
   return { id: message.tool_call_id, name: call?.function?.name, text: message.content };
 }
 
-export async function rpcFixture(directory, cli, extensions, baseUrl) {
+export async function rpcFixture(directory, cli, packages, baseUrl, extensions = []) {
   const agent = join(directory, "agent");
   const cwd = join(directory, "work");
   const session = join(directory, "session.jsonl");
   await mkdir(agent, { recursive: true });
   await mkdir(cwd, { recursive: true });
   await writeFile(join(agent, "settings.json"), JSON.stringify({
-    compaction: { enabled: false }, retry: { enabled: false },
+    packages, compaction: { enabled: false, keepRecentTokens: 256 }, retry: { enabled: false },
   }));
   await writeFile(join(agent, "models.json"), JSON.stringify({
     providers: { fixture: {
@@ -97,13 +98,12 @@ export async function rpcFixture(directory, cli, extensions, baseUrl) {
   return { cwd, session, launch };
   function launch() {
     const child = spawn(process.execPath, [
-      cli, "--mode", "rpc", "--offline", "--no-extensions", "--no-skills",
+      cli, "--mode", "rpc", "--offline", "--no-skills",
       "--provider", "fixture", "--model", "fixture", "--session", session,
       ...extensions.flatMap(extension => ["-e", extension]),
     ], {
       cwd, env: {
         PATH: process.env.PATH,
-        HOME: directory,
         PI_CODING_AGENT_DIR: agent,
         PI_OFFLINE: "1",
         NO_COLOR: "1",

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,7 +38,8 @@ async function withPi(
     wait(match: (frame: Frame) => boolean): Promise<Frame>;
     frames: Frame[];
   }) => Promise<void>,
-  hold = false
+  hold = false,
+  integrated = false
 ) {
   const root = await mkdtemp(join(tmpdir(), "goalplus-controls-"));
   let child: ChildProcessWithoutNullStreams | undefined;
@@ -53,7 +54,8 @@ async function withPi(
       env: {
         PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: root, USERPROFILE: root,
         PI_CODING_AGENT_DIR: join(root, "agent"),
-        GOAL_CONTROLS_HOLD: hold ? "1" : "0"
+        GOAL_CONTROLS_HOLD: hold ? "1" : "0",
+        GOAL_CONTROLS_INTEGRATED: integrated ? "1" : "0"
       }
     });
     const processHandle = child;
@@ -228,3 +230,52 @@ test("a malformed latest snapshot fails closed and can be cleared explicitly", a
     await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("No Goal") === true);
   });
 }, 8000);
+
+test("an unsigned legacy Goal opens paused and needs review before native work", async () => {
+  await withPi(async rpc => {
+    await rpc.command("prompt", { message: "Initialize the native fixture session." });
+    await rpc.wait(frame => frame.type === "agent_settled");
+    await rpc.command("prompt", { message: "/fixture-legacy-goal" });
+    const session = await rpc.command("get_state");
+    await rpc.command("new_session");
+    const count = rpc.frames.length;
+    expect((await rpc.command("switch_session", { sessionPath: session.data?.sessionFile })).success).toBe(true);
+    expect(rpc.frames.slice(count)).toContainEqual(expect.objectContaining({
+      widgetKey: "pi-goalplus",
+      widgetLines: expect.arrayContaining([expect.stringContaining("[Paused]")])
+    }));
+    const resume = rpc.command("prompt", { message: "/goal resume" });
+    const editor = await rpc.wait(frame => frame.type === "extension_ui_request" && frame.method === "editor");
+    rpc.send({ type: "extension_ui_response", id: editor.id, cancelled: true });
+    await resume;
+    expect(rpc.frames.slice(count).some(frame => frame.type === "agent_start")).toBe(false);
+  }, false, true);
+}, 8000);
+
+test("an authenticated Goal restarts from the original file but its copy still needs review", async () => {
+  await withPi(async rpc => {
+    await rpc.command("prompt", { message: `/goal start ${JSON.stringify(definition)}` });
+    await rpc.wait(frame => frame.type === "agent_start");
+    await rpc.command("prompt", { message: "/goal stop" });
+    await rpc.wait(frame => frame.type === "agent_settled");
+    await rpc.command("prompt", { message: "/fixture-park-active" });
+    const original = (await rpc.command("get_state")).data?.sessionFile;
+    expect(original).toMatch(/\.jsonl$/);
+    if (!original) throw Error("Pi did not persist the fixture session.");
+    const copy = join(dirname(original), "imported-copy.jsonl");
+    await copyFile(original, copy);
+
+    await rpc.command("new_session");
+    const copyEvents = new Set(rpc.frames);
+    await rpc.command("switch_session", { sessionPath: copy });
+    await rpc.wait(frame => !copyEvents.has(frame) && frame.method === "setWidget" &&
+      frame.widgetLines?.some(line => line.includes("no verified local origin")) === true);
+    expect(rpc.frames.filter(frame => !copyEvents.has(frame) && frame.type === "agent_start")).toHaveLength(0);
+
+    const originalEvents = new Set(rpc.frames);
+    await rpc.command("switch_session", { sessionPath: original });
+    await rpc.wait(frame => !originalEvents.has(frame) && frame.type === "agent_start");
+    await rpc.command("prompt", { message: "/goal stop" });
+    await rpc.wait(frame => !originalEvents.has(frame) && frame.type === "agent_settled");
+  }, true, true);
+}, 10000);

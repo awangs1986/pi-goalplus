@@ -31,6 +31,29 @@ export default function goalPlus(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("context", (event, ctx) => {
+    const latest = event.messages.findLastIndex(
+      message => message.role === "toolResult" && message.toolName === "goalplus_read",
+    );
+    if (latest < 0) return;
+    const runId = runner.current(ctx);
+    return { messages: event.messages.map((message, index) => {
+      if (message.role !== "toolResult" || message.toolName !== "goalplus_read") return message;
+      if (index === latest && runId && message.content.some(part => {
+        if (part.type !== "text") return false;
+        try {
+          return JSON.parse(part.text)?.runId === runId;
+        } catch {
+          return false;
+        }
+      })) return message;
+      return {
+        ...message,
+        content: [{ type: "text", text: "Previous Goal snapshot. Read the current confirmed Goal when needed." }],
+      };
+    }) };
+  });
+
   registerGoalTools(pi, store, runner);
   registerGoalCommands(pi, store, runner);
 }

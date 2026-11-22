@@ -3,6 +3,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { registerGoalCommands, renderGoal } from "../../src/commands.js";
 import { createGoalStore } from "../../src/store.js";
+import goalPlus from "../../src/index.js";
 
 export default function controlsFixture(pi: ExtensionAPI) {
   const store = createGoalStore(pi, renderGoal);
@@ -54,6 +55,36 @@ export default function controlsFixture(pi: ExtensionAPI) {
       return stream;
     }
   });
+  if (process.env.GOAL_CONTROLS_INTEGRATED === "1") {
+    goalPlus(pi);
+    pi.registerCommand("fixture-park-active", {
+      description: "Prepare a locally verified active Goal at a settled boundary",
+      handler: async (_args, ctx) => {
+        const goal = store.read(ctx);
+        if (goal?.status !== "paused" || goal.dispatch) throw Error("Fixture requires a settled, paused Goal.");
+        store.write(ctx, { ...goal, status: "active", reason: undefined });
+      }
+    });
+    pi.registerCommand("fixture-legacy-goal", {
+      description: "Append an unsigned legacy Goal snapshot",
+      handler: async () => pi.appendEntry("pi-goalplus:state", {
+        schema: 1,
+        goal: {
+          schema: 1,
+          id: "fixture-legacy-goal",
+          revision: 1,
+          status: "active",
+          objective: "Check imported fixtures",
+          constraints: [],
+          criteria: [{ id: "c1", requirement: "Fixture is reviewed", verification: "Review the fixture" }],
+          evidence: [],
+          tokensUsed: 0,
+          noProgress: 0,
+        }
+      })
+    });
+    return;
+  }
   let requested = false;
   registerGoalCommands(pi, store, {
     request() {

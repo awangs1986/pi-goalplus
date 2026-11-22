@@ -61,7 +61,14 @@ function details(goal: Goal): string {
   if (goal.stage) lines.push(`Stage: ${plainLine(goal.stage)}`);
   if (goal.next) lines.push(`Next: ${plainLine(goal.next)}`);
   if (goal.reason) lines.push(`Reason: ${plainLine(goal.reason)}`);
-  lines.push(`Reported tokens: ${goal.tokensUsed}`, "Criterion evidence:");
+  lines.push(`Reported tokens: ${goal.tokensUsed}`);
+  if (goal.constraintReviews?.length) {
+    lines.push("Constraint evidence:");
+    for (const item of goal.constraintReviews) {
+      lines.push(`- [${item.index}] ${item.state}: ${plainLine(item.evidence)}`);
+    }
+  }
+  lines.push("Criterion evidence:");
   for (const criterion of goal.criteria) {
     const evidence = goal.evidence.find(item => item.criterionId === criterion.id);
     lines.push(evidence
@@ -102,7 +109,7 @@ function revisedGoal(goal: Goal, definition: GoalDefinition): Goal {
   if (exhausted) {
     status = "budgetLimited";
     reason = "The confirmed budget is exhausted. Increase or remove it to resume.";
-  } else if (status === "budgetLimited" || status === "complete") {
+  } else if (status === "budgetLimited" || status === "complete" || goal.needsReview) {
     status = "paused";
     reason = "Requirements changed. Resume to verify the new revision.";
   }
@@ -211,11 +218,20 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
       if (args === "resume") {
         const goal = getGoal(ctx);
         if (goal.status === "active") return;
+        if (goal.needsReview) {
+          requireIdle(ctx);
+          const { objective, constraints, criteria, budgetTokens } = goal;
+          const reviewed = await reviewDefinition(ctx, { objective, constraints, criteria, budgetTokens }, false);
+          if (!reviewed) return;
+          store.write(ctx, initialGoal(reviewed), "user-confirmed");
+          runner.request(ctx);
+          return;
+        }
         if (goal.status === "complete") throw Error("The Goal is complete. Start a new Goal or edit its definition.");
         if (goal.status === "budgetLimited") throw Error("Increase or remove the Goal budget with /goal edit before resuming.");
         requireIdle(ctx);
         if (goal.dispatch) throw Error("The previous Goal dispatch has not settled.");
-        store.write(ctx, { ...goal, status: "active", reason: undefined, noProgress: 0 });
+        store.write(ctx, { ...goal, status: "active", reason: undefined, noProgress: 0, consecutiveFailures: 0 });
         runner.request(ctx);
         return;
       }
@@ -234,7 +250,7 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
           }, true);
         if (!definition) return;
         const next = revisedGoal(goal, definition);
-        store.write(ctx, next);
+        store.write(ctx, next, "user-confirmed");
         if (next.status === "active") runner.request(ctx);
         return;
       }
@@ -252,7 +268,7 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
           criteria: [{ id: "c1", requirement: "", verification: "" }]
         }, false);
       if (!definition) return;
-      store.write(ctx, initialGoal(definition));
+      store.write(ctx, initialGoal(definition), "user-confirmed");
       runner.request(ctx);
     }
   });

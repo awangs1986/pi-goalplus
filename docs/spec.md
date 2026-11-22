@@ -38,7 +38,9 @@ activity calls for a different approach before diagnosing a blocker. An active
 Goal can become paused, blocked, limited by provider usage, limited by an
 explicit token budget, or complete. Report the reason and restore previous
 requirements when the user resumes. Never automatically repeat a dispatch with
-an uncertain outcome. A settled Goal can resume safely from its saved history.
+an uncertain outcome. A settled Goal can resume safely from its saved history. A freshly confirmed
+Goal and its first dispatch must be saved by the first provider request. One
+live Pi process owns any given native session.
 Token limits are evaluated from reported usage at execution boundaries. A
 provider call already in progress can use more tokens before usage is known.
 
@@ -60,8 +62,9 @@ by itself. Prefer runnable checks and concrete results.
 
 Native Pi compaction and optional Handoff keep their own compaction policies.
 The next Goal work reads the stored revision and evidence again. Repeated
-rounds need short context and receipt pointers; full tool outputs live in
-native Pi history.
+rounds need short context and receipt pointers. Older Goal reads appear only
+as references in model requests; their full original results stay in native
+Pi history.
 
 ## Acceptance
 
