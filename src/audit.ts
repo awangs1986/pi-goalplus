@@ -309,11 +309,13 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
   pi.registerTool({
     name: "goalplus_checkpoint",
     label: "Audit Goal Stage",
-    description: "Audit a stage against the confirmed Goal or recheck it before continuing. Include each criterion and constraint once. Set taskCompleted only after finishing and verifying the current task. Finish the last task with goalplus_complete after its final audit. Pass/fail needs a current native source receipt with output and a short observed result. Shell or unknown tools invalidate previous receipts. Group shell checks in one invocation when needed. Retain only evidence unaffected by later work. Keep evidence descriptions short and omit secrets. Reopen any item whose proof is affected, missing, or uncertain. A passed constraint requires a current successful source receipt. Mark an uncertain constraint unknown and explain what needs rechecking.",
+    description: "Audit a stage against the confirmed Goal or recheck it before continuing. Include each criterion and constraint once. Set taskCompleted only after finishing and verifying the current task. Call this on its own at a task boundary. Set nextStageTokens when you can estimate the upcoming work's additional context, including tool output and verification. Finish the last task with goalplus_complete after its final audit. Pass/fail needs a current native source receipt with output and a short observed result. Shell or unknown tools invalidate previous receipts. Group shell checks in one invocation when needed. Retain only evidence unaffected by later work. Keep evidence descriptions short and omit secrets. Reopen any item whose proof is affected, missing, or uncertain. A passed constraint requires a current successful source receipt. Mark an uncertain constraint unknown and explain what needs rechecking.",
     parameters: Type.Object({
       ...identity,
       stage: Type.String({ minLength: 1, maxLength: 240 }),
       next: Type.Optional(Type.String({ minLength: 1, maxLength: 400 })),
+      nextStageTokens: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
+        description: "Estimated additional context tokens needed for the next unfinished stage." })),
       taskCompleted: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TASKS })),
       criteria: Type.Array(criterionReport, { minItems: 1, maxItems: MAX_ITEMS }),
       constraints: Type.Array(constraintReport, { maxItems: MAX_ITEMS })
@@ -390,13 +392,16 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
         completionRunId: undefined
       });
       if (taskCompleted !== undefined) requireFreshRead(state);
-      return toolOutput({
+      const compact = (taskCompleted !== undefined || next !== undefined || args.nextStageTokens !== undefined) &&
+        runner.beforeNextStage(ctx, args.nextStageTokens);
+      return { ...toolOutput({
         status: "audited",
         runId,
         passed: evidence.filter((item) => item.verdict === "pass").length,
         total: goal.criteria.length,
-        unresolvedConstraints: constraintReviews.filter((item) => item.state !== "pass").map((item) => item.index)
-      });
+        unresolvedConstraints: constraintReviews.filter((item) => item.state !== "pass").map((item) => item.index),
+        ...(compact ? { nextStageCompaction: "scheduled" } : {}),
+      }), terminate: compact };
     }
   });
 

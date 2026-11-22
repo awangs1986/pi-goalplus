@@ -1,6 +1,6 @@
 {
   "name": "pi-goalplus",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Persistent, evidence-checked goals for the Pi coding agent",
   "type": "module",
   "license": "UNLICENSED",

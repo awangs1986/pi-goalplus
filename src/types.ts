@@ -80,4 +80,8 @@ export interface GoalRunner {
   request(ctx: ExtensionContext): void;
   /** ID of the current Goal run; undefined outside its owned turn. */
   current(ctx: ExtensionContext): string | undefined;
+  /** Return whether a checkpoint should end its run before native compaction. */
+  beforeNextStage(ctx: ExtensionContext, estimatedTokens?: number): boolean;
+  /** A proactive compaction is in progress for the current Goal. */
+  compacting(ctx: ExtensionContext): boolean;
 }

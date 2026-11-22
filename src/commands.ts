@@ -223,17 +223,17 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
 
       if (args === "stop" || args === "pause") {
         const goal = getGoal(ctx);
-        const ownRun = runner.current(ctx);
+        const ownWork = runner.current(ctx) || runner.compacting(ctx);
         if (goal.status === "active") {
           store.write(ctx, {
             ...goal, status: "paused",
             reason: args === "stop" ? "Stopped by the user." : "Paused by the user.",
             completionRunId: undefined
           });
-        } else if (!(args === "stop" && goal.status === "paused" && ownRun)) {
+        } else if (!(args === "stop" && goal.status === "paused" && ownWork)) {
           throw Error("Only an active Goal can be paused or stopped.");
         }
-        if (args === "stop" && ownRun) ctx.abort();
+        if (args === "stop" && ownWork) ctx.abort();
         return;
       }
 

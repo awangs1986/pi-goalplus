@@ -10,6 +10,9 @@ const SAFE_RETRY_DELAYS = [250, 1000];
 const RECENT_PROGRESS_LIMIT = 128;
 const RECENT_ACTIVITY_LIMIT = 128;
 const START_ACK_TIMEOUT = 30_000;
+const EARLY_COMPACTION_PERCENT = 70;
+const BUDGET_USED = "The Goal token budget has been used. Raise or remove the budget to continue.";
+const GOAL_COMPACTION_INSTRUCTIONS = "Preserve progress on the active Goal, the next unfinished task, changed files, verification results, and unresolved issues. Keep the summary concise. GoalPlus will reread the original requirements and task progress after compaction.";
 const VOLATILE_RESULT_FIELDS = /^(?:timestamp|(?:request|response|toolCall|trace|span)_?id|(?:created|updated|started|finished)_?at|(?:elapsed|duration)(?:_?ms)?)$/i;
 
 interface NativeRun {
@@ -25,6 +28,21 @@ interface NativeRun {
   statusCode?: number;
   providerError?: string;
   possibleEffects?: boolean;
+  stageStart?: ContextSample;
+  stageForecast?: number;
+  yieldForCompaction?: boolean;
+}
+
+interface ContextSample {
+  tokens: number;
+  contextWindow: number;
+}
+
+interface EarlyCompaction {
+  sessionId: string;
+  goalId: string;
+  revision: number;
+  cancelled: boolean;
 }
 
 function progressKey(goal: Goal): string {
@@ -105,6 +123,23 @@ function safeTokens(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
+function contextSample(ctx: ExtensionContext): ContextSample | undefined {
+  const usage = ctx.getContextUsage();
+  if (usage?.tokens == null || !Number.isSafeInteger(usage.tokens) || usage.tokens < 0 ||
+      !Number.isSafeInteger(usage.contextWindow) || usage.contextWindow <= 0) return;
+  return { tokens: usage.tokens, contextWindow: usage.contextWindow };
+}
+
+function stageTokenForecast(ctx: ExtensionContext, current?: ContextSample, start?: ContextSample, estimatedTokens?: number): number {
+  const growth = current && start && current.contextWindow === start.contextWindow
+    ? Math.max(0, current.tokens - start.tokens) : 0;
+  return Math.max(safeTokens(ctx.model?.maxTokens), estimatedTokens ?? growth);
+}
+
+function stageKey(goal: Goal): string {
+  return `${goal.id}:${goal.revision}:${goal.plan?.completed ?? -1}`;
+}
+
 function entryTokens(entry: SessionEntry): number {
   if (entry.type === "message") {
     const message = entry.message;
@@ -146,6 +181,8 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
   let run: NativeRun | undefined;
   let next: ReturnType<typeof setTimeout> | undefined;
   let startWatch: ReturnType<typeof setTimeout> | undefined;
+  let compaction: EarlyCompaction | undefined;
+  let attemptedStage: string | undefined;
   const issuedInitialPrompts = new Set<string>();
 
   function cancelNext(): void {
@@ -170,6 +207,70 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     } catch {
       ctx.ui.notify("GoalPlus could not confirm the recorded state. Inspect /goal status before resuming.", "error");
     }
+  }
+
+  function shouldCompactStage(goal: Goal, usage: ContextSample | undefined, forecast: number): usage is ContextSample {
+    if (!usage) return false;
+    const key = stageKey(goal);
+    if (usage.tokens / usage.contextWindow <= EARLY_COMPACTION_PERCENT / 100) {
+      if (attemptedStage === key) attemptedStage = undefined;
+      return false;
+    }
+    return attemptedStage !== key && usage.contextWindow - usage.tokens <= forecast;
+  }
+
+  function matchesCompaction(ctx: ExtensionContext, goal: Goal | undefined, candidate: EarlyCompaction): goal is Goal {
+    return goal?.id === candidate.goalId && goal.revision === candidate.revision &&
+      ctx.sessionManager.getSessionId() === candidate.sessionId;
+  }
+
+  function compacting(ctx: ExtensionContext): boolean {
+    return compaction !== undefined && matchesCompaction(ctx, store.read(ctx), compaction);
+  }
+
+  function compactBeforeStage(ctx: ExtensionContext, goal: Goal, forecast: number): boolean {
+    const usage = contextSample(ctx);
+    if (!shouldCompactStage(goal, usage, forecast)) return false;
+    const attempt: EarlyCompaction = {
+      sessionId: ctx.sessionManager.getSessionId(), goalId: goal.id, revision: goal.revision, cancelled: false,
+    };
+    compaction = attempt;
+    attemptedStage = stageKey(goal);
+    const percent = (usage.tokens / usage.contextWindow * 100).toFixed(1);
+    ctx.ui.notify(`GoalPlus is compacting context at ${percent}% before the next stage.`, "info");
+
+    const finish = (reportedTokens: number, failed = false) => {
+      if (compaction !== attempt) return;
+      compaction = undefined;
+      asyncBoundary(ctx, () => {
+        const current = store.read(ctx);
+        if (!matchesCompaction(ctx, current, attempt)) return;
+        const updated = { ...current, tokensUsed: addTokens(current.tokensUsed, reportedTokens) };
+        if (current.status === "active") {
+          if (reachedBudget(updated)) {
+            updated.status = "budgetLimited";
+            updated.reason = BUDGET_USED;
+          } else if (attempt.cancelled) {
+            updated.status = "paused";
+            updated.reason = "Goal context compaction was cancelled. Resume to continue.";
+          } else if (failed) {
+            ctx.ui.notify("GoalPlus could not compact early. Continuing with Pi's normal context handling.", "warning");
+          }
+        }
+        if (updated.tokensUsed !== current.tokensUsed || updated.status !== current.status) store.write(ctx, updated);
+        if (updated.status === "active") schedule(ctx, updated);
+      });
+    };
+    try {
+      ctx.compact({
+        customInstructions: GOAL_COMPACTION_INSTRUCTIONS,
+        onComplete: result => finish(safeTokens(result.usage?.totalTokens)),
+        onError: () => finish(0, true),
+      });
+    } catch {
+      finish(0, true);
+    }
+    return true;
   }
 
   function abandonStart(ctx: ExtensionContext, candidate: NativeRun): void {
@@ -199,8 +300,8 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     startWatch.unref();
   }
 
-  function request(ctx: ExtensionContext): void {
-    if (run || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+  function request(ctx: ExtensionContext, forecast?: number): void {
+    if (run || compaction || !ctx.isIdle() || ctx.hasPendingMessages()) return;
     const goal = store.read(ctx);
     if (goal?.status !== "active" || goal.dispatch) return;
     cancelNext();
@@ -210,7 +311,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     }
     if (reachedBudget(goal)) {
       store.write(ctx, {
-        ...goal, status: "budgetLimited", reason: "The Goal token budget has been used. Raise or remove the budget to continue.",
+        ...goal, status: "budgetLimited", reason: BUDGET_USED,
       });
       return;
     }
@@ -218,6 +319,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       store.write(ctx, { ...goal, status: "blocked", reason: "Select a Pi model before resuming this Goal." });
       return;
     }
+    if (forecast !== undefined && compactBeforeStage(ctx, goal, forecast)) return;
 
     const id = randomUUID();
     const sessionId = ctx.sessionManager.getSessionId();
@@ -262,7 +364,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     }
   }
 
-  function schedule(ctx: ExtensionContext, goal: Goal, delay = 0): void {
+  function schedule(ctx: ExtensionContext, goal: Goal, delay = 0, forecast?: number): void {
     if (next) return;
     const sessionId = ctx.sessionManager.getSessionId();
     next = setTimeout(() => {
@@ -270,7 +372,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       asyncBoundary(ctx, () => {
         const current = store.read(ctx);
         if (ctx.sessionManager.getSessionId() === sessionId &&
-          current?.id === goal.id && current.revision === goal.revision) request(ctx);
+          current?.id === goal.id && current.revision === goal.revision) request(ctx, forecast);
       });
     }, delay);
   }
@@ -281,8 +383,23 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       goal.revision === run.revision) return run.id;
   }
 
+  function beforeNextStage(ctx: ExtensionContext, estimatedTokens?: number): boolean {
+    const goal = store.read(ctx);
+    if (!run?.started || !matches(ctx, goal, run) || goal.status !== "active") return false;
+    const usage = contextSample(ctx);
+    run.stageForecast = stageTokenForecast(ctx, usage, run.stageStart, estimatedTokens);
+    run.stageStart = usage;
+    run.yieldForCompaction = !ctx.hasPendingMessages() && shouldCompactStage(goal, usage, run.stageForecast);
+    return run.yieldForCompaction;
+  }
+
   pi.on("input", event => {
-    if (event.source !== "extension") cancelNext();
+    if (event.source === "extension") return;
+    cancelNext();
+    if (run) {
+      run.yieldForCompaction = false;
+      run.stageForecast = undefined;
+    }
   });
 
   pi.on("before_agent_start", (event, ctx) => {
@@ -312,6 +429,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       ctx.abort();
       return;
     }
+    run.stageStart = contextSample(ctx);
     store.write(ctx, { ...goal, dispatch: { ...goal.dispatch, phase: "running" } });
   });
 
@@ -339,6 +457,14 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     enforceBudget(ctx, safeTokens(event.message.usage?.totalTokens));
   });
 
+  pi.on("tool_call", (_event, ctx) => {
+    if (!run?.yieldForCompaction) return;
+    const goal = store.read(ctx);
+    if (matches(ctx, goal, run) && goal.status === "active") {
+      return { block: true, terminate: true, reason: "GoalPlus is yielding so Pi can compact before the next stage." };
+    }
+  });
+
   pi.on("tool_execution_start", event => {
     if (run?.started && !isGoalTool(event.toolName) &&
       !isNativeReadOnly(pi, event.toolName)) run.possibleEffects = true;
@@ -354,16 +480,27 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     run.activity.add(key);
   });
 
-  pi.on("turn_end", (_event, ctx) => enforceBudget(ctx));
+  pi.on("turn_end", (_event, ctx) => {
+    enforceBudget(ctx);
+    if (run?.started && !run.stageStart) run.stageStart = contextSample(ctx);
+  });
 
   pi.on("session_compact", (_event, ctx) => {
     enforceBudget(ctx);
     const goal = store.read(ctx);
-    if (!run && goal?.status === "active" && !goal.dispatch) schedule(ctx, goal);
+    if (run && matches(ctx, goal, run)) {
+      run.stageStart = undefined;
+      run.stageForecast = undefined;
+      run.yieldForCompaction = false;
+    }
+    if (!run && !compaction && goal?.status === "active" && !goal.dispatch) schedule(ctx, goal);
   });
-  pi.on("session_compact_failed", (_event, ctx) => {
+  pi.on("session_compact_failed", (event, ctx) => {
     const goal = store.read(ctx);
-    if (!run && goal?.status === "active" && !goal.dispatch) schedule(ctx, goal);
+    if (compaction && event.reason === "manual" && matchesCompaction(ctx, goal, compaction)) {
+      compaction.cancelled = event.aborted;
+    }
+    if (!run && !compaction && goal?.status === "active" && !goal.dispatch) schedule(ctx, goal);
   });
 
   pi.on("agent_before_settle", (event) => {
@@ -389,8 +526,13 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       }
       const delay = decideNext(goal, nextGoal, settled, event.aborted);
       store.write(ctx, nextGoal);
-      if (nextGoal.status === "active") schedule(ctx, nextGoal, delay);
-    } else if (goal?.status === "active" && !goal.dispatch) {
+      if (nextGoal.status === "active") {
+        const forecast = settled.outcome === "completed"
+          ? settled.stageForecast ?? stageTokenForecast(ctx, contextSample(ctx), settled.stageStart)
+          : undefined;
+        schedule(ctx, nextGoal, delay, forecast);
+      }
+    } else if (!compaction && goal?.status === "active" && !goal.dispatch) {
       schedule(ctx, goal);
     }
   });
@@ -400,6 +542,8 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     clearStartWatch();
     issuedInitialPrompts.clear();
     run = undefined;
+    compaction = undefined;
+    attemptedStage = undefined;
     const goal = store.read(ctx);
     if (!goal) return;
     const ownerSessionId = ctx.sessionManager.getSessionId();
@@ -438,16 +582,18 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     clearStartWatch();
     issuedInitialPrompts.clear();
     run = undefined;
+    compaction = undefined;
+    attemptedStage = undefined;
   });
 
-  return { request, current };
+  return { request, current, beforeNextStage, compacting };
 }
 
 function decideNext(goal: Goal, next: Goal, run: NativeRun, aborted: boolean): number {
   if (goal.status !== "active" || goal.revision !== run.revision) return 0;
   if (reachedBudget(next)) {
     next.status = "budgetLimited";
-    next.reason = "The Goal token budget has been used. Raise or remove the budget to continue.";
+    next.reason = BUDGET_USED;
     return 0;
   }
   if (aborted || run.outcome === "aborted") {

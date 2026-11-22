@@ -22,6 +22,9 @@ const tasks = [
 const unverified = goal.criteria.map(({ id }) => ({ id, state: "reopen" }));
 try {
   const installed = await install();
+  await compactBeforeNextTask(installed);
+  await compactBeforeNextTask(installed, { key: "at-70-percent", usage: 44_797, estimate: 30_000, expected: false });
+  await compactBeforeNextTask(installed, { key: "enough-space", usage: 47_000, estimate: 2_000, expected: false });
   await orderedTasks(installed);
   await longGoal(installed);
   await parallelEvidence(installed);
@@ -95,6 +98,74 @@ function verified(id, state, body, observed) {
 function strip(rpc, patterns) {
   return rpc.events.find(event => event.type === "extension_ui_request" && event.method === "setWidget" &&
     patterns.every(pattern => pattern.test(JSON.stringify(event))));
+}
+
+async function compactBeforeNextTask(installed, { key = "early-compact", usage = 47_000, estimate, expected = true } = {}) {
+  let scope, a;
+  let working = false;
+  const summary = "Stage A is complete. Continue at task two and verify both fixtures.";
+  const actions = [
+    readGoal,
+    body => { scope = readScope(body); return planTasks(scope); },
+    readGoal,
+    () => alignTask(scope, 1),
+    () => read("a.txt"),
+    body => {
+      const call = checkpoint(scope, "Verified A", [verified("A", "pass", body, "verified-a"), unverified[1]], 1);
+      call.args.nextStageTokens = estimate;
+      return { ...call, usage };
+    },
+    body => {
+      assert.equal(JSON.stringify(body.messages).includes(summary), expected,
+        "only compress when the next task needs more context and usage exceeds 70%");
+      return readGoal();
+    },
+    body => {
+      const after = JSON.parse(lastTool(body).text);
+      assert.equal(after.goalId, scope.goalId);
+      assert.equal(after.runId !== scope.runId, expected, "compaction resumes in a fresh Goal run");
+      assert.equal(after.objective, goal.objective);
+      assert.deepEqual(after.plan, { tasks, completed: 1 });
+      scope = readScope(body);
+      return alignTask(scope, 2);
+    },
+    () => write("b.txt", "verified-b"),
+    () => read("a.txt"),
+    body => { a = verified("A", "pass", body, "verified-a"); return read("b.txt"); },
+    body => checkpoint(scope, "Verified both fixtures", [a, verified("B", "pass", body, "verified-b")]),
+    () => ({ tool: "goalplus_complete", args: scope }),
+    () => ({ text: "Both tasks verified." }),
+  ];
+  const server = await modelServer(body => {
+    if (!toolNames(body).length) return { text: summary };
+    if (!working) return { text: "Recorded the initial context." };
+    const action = actions.shift();
+    assert.ok(action, "unexpected continuation");
+    return action(body);
+  });
+  let rpc;
+  try {
+    const fixture = await rpcFixture(join(scratch, key), installed.cli, installed.packages, server.baseUrl);
+    await writeFile(join(fixture.cwd, "a.txt"), "verified-a");
+    rpc = fixture.launch();
+    await rpc.command("prompt", { message: "Initialize the session. " + "Previous fixture notes. ".repeat(500) });
+    await until(() => rpc.events.some(event => event.type === "agent_settled"), "initial native turn");
+    working = true;
+    await rpc.command("prompt", { message: "/goal start " + JSON.stringify(goal) });
+    await until(() => {
+      server.assertHealthy();
+      return strip(rpc, [/\[Complete\]/, /Task 2\/2/]);
+    }, "Goal completion after proactive compaction");
+    const entries = (await readFile(fixture.session, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(entries.filter(entry => entry.type === "compaction").length, expected ? 1 : 0);
+    assert.equal(actions.length, 0);
+    assert.equal(await readFile(join(fixture.cwd, "b.txt"), "utf8"), "verified-b");
+    console.log(expected ? "PASS native Goal compacts above 70% before risky work and resumes the saved task" :
+      `PASS native Goal skips proactive compaction at ${key}`);
+  } finally {
+    if (rpc) await rpc.close();
+    await server.close();
+  }
 }
 
 async function orderedTasks(installed) {

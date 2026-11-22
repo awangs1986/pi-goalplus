@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Request native Pi compaction before the next Goal stage when context usage
+  exceeds 70% and the expected work reaches the remaining capacity.
+- Resume the saved task after compaction and include reported summary usage in
+  the Goal token budget.
+
 ## 0.2.0
 
 - Start a Goal as soon as the user submits `/goal <objective>`.

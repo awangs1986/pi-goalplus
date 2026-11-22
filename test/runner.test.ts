@@ -12,10 +12,12 @@ function fixture(goalChanges: Partial<Goal> = {}, blankPersistentSession = false
   const triggers: Trigger[] = [];
   const userPrompts: string[] = [];
   const branch: SessionEntry[] = [];
+  const compactions: NonNullable<Parameters<ExtensionContext["compact"]>[0]>[] = [];
   const sources = new Map(["edit", "write", "read", "bash", "grep", "find", "ls", "powershell"].map(name => [name, "builtin"]));
   let idle = true;
   let queued = false;
   let aborted = false;
+  let context: ReturnType<ExtensionContext["getContextUsage"]>;
   let goal: Goal | undefined = {
     schema: 1, id: "g", revision: 1, status: "active",
     objective: "Repair the fixtures",
@@ -38,6 +40,8 @@ function fixture(goalChanges: Partial<Goal> = {}, blankPersistentSession = false
     model: { id: "test-model" },
     isIdle: () => idle,
     hasPendingMessages: () => queued,
+    getContextUsage: () => context,
+    compact: (options: (typeof compactions)[number]) => { compactions.push(options); },
     abort: () => { aborted = true; },
     ui: { notify: vi.fn() },
     sessionManager: {
@@ -67,14 +71,61 @@ function fixture(goalChanges: Partial<Goal> = {}, blankPersistentSession = false
   };
   const change = (updates: Partial<Goal>) => { goal = { ...goal!, ...updates }; };
   return {
-    runner, ctx, triggers, userPrompts, emit, claim, settle, change, branch, sources,
+    runner, ctx, triggers, userPrompts, emit, claim, settle, change, branch, sources, compactions,
     goal: () => goal!,
     setPending: (state: boolean) => { queued = state; },
+    setContext: (tokens: number) => { context = { tokens, contextWindow: 64_000, percent: tokens / 640 }; },
     aborted: () => aborted,
   };
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("proactive Goal compaction", () => {
+  async function reachStageBoundary(f: ReturnType<typeof fixture>) {
+    f.setContext(10_000);
+    f.runner.request(f.ctx);
+    await f.claim(f.triggers[0]);
+    f.setContext(47_000);
+    expect(f.runner.beforeNextStage(f.ctx, 20_000)).toBe(true);
+    await f.emit({ type: "agent_before_settle", outcome: "completed" });
+    await f.settle();
+    await vi.runOnlyPendingTimersAsync();
+    expect(f.compactions).toHaveLength(1);
+    expect(f.triggers).toHaveLength(1);
+    expect(f.runner.compacting(f.ctx)).toBe(true);
+  }
+
+  it("counts early compaction usage before starting the next stage", async () => {
+    vi.useFakeTimers();
+    const f = fixture({ budgetTokens: 50 });
+    await reachStageBoundary(f);
+
+    f.compactions[0].onComplete?.({
+      summary: "The first stage is settled", firstKeptEntryId: "new", tokensBefore: 47_000, usage: usage(50),
+    });
+    await vi.runOnlyPendingTimersAsync();
+    expect(f.goal()).toMatchObject({ status: "budgetLimited", tokensUsed: 50 });
+    expect(f.triggers).toHaveLength(1);
+  });
+
+  it.each([true, false])("handles native early compaction failure (cancelled: %s)", async cancelled => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await reachStageBoundary(f);
+
+    await f.emit({ type: "session_compact_failed", reason: "manual", aborted: cancelled });
+    f.compactions[0].onError?.(new Error("Fixture compaction did not finish"));
+    await vi.runOnlyPendingTimersAsync();
+    expect(f.goal().status).toBe(cancelled ? "paused" : "active");
+    expect(f.triggers).toHaveLength(cancelled ? 1 : 2);
+    if (!cancelled) {
+      await f.claim(f.triggers[1]);
+      expect(f.runner.beforeNextStage(f.ctx, 20_000)).toBe(false);
+      expect(f.compactions).toHaveLength(1);
+    }
+  });
+});
 
 describe("native Goal continuation", () => {
   it("automatically runs beyond three settled stages with current evidence", async () => {

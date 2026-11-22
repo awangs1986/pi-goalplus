@@ -87,6 +87,8 @@ export default function controlsFixture(pi: ExtensionAPI) {
   }
   let requested = false;
   registerGoalCommands(pi, store, {
+    beforeNextStage: () => false,
+    compacting: () => false,
     request() {
       requested = true;
       pi.sendUserMessage("Run the approved controls fixture.", { expandPromptTemplates: false });

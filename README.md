@@ -37,7 +37,7 @@ progress survive compaction and session reopen.
 | `/goal start <JSON>` | Start an explicitly approved structured Goal from a client without a dialog. |
 | `/goal edit` or `/goal edit <JSON>` | Confirm or explicitly submit a new revision of the saved requirements. |
 | `/goal pause` | Let the current run settle and pause new Goal turns. |
-| `/goal stop` | Pause the Goal and cancel its current run through Pi. |
+| `/goal stop` | Pause the Goal and cancel its current Pi run or proactive compaction. |
 | `/goal resume` | Continue the saved Goal when eligible. |
 | `/goal clear` | Clear the Goal while keeping native conversation history and workspace files. |
 
@@ -67,9 +67,13 @@ that support the verdicts. Pi can reopen earlier tasks for repairs. The final
 task finishes once the current revision passes its acceptance audit and the
 native run settles successfully.
 
-Native Pi owns compaction. GoalPlus keeps the Goal in separate native session
-entries, so the next turn retrieves the same confirmed requirements even if
-prior model context was condensed. Tool results remain in Pi's native history.
+When context usage exceeds 70% and the remaining space looks too small for
+the next stage, GoalPlus saves the checkpoint and requests native Pi
+compaction before continuing. The forecast uses recent context growth or an
+estimate supplied at the checkpoint, with room for at least one model
+response. The next turn rereads the saved requirements and task progress.
+Reported compaction tokens count toward the Goal budget. Tool results remain
+available in Pi's native history.
 Arbitrary shell and other potentially mutating tools make previous workspace
 evidence stale. For several shell verifications, run them together and capture
 each outcome in one result, then add read-only checks as needed. Final

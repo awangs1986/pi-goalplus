@@ -14,6 +14,7 @@ const RULES = [
   "Before starting or resuming each task, compare it with the original objective, constraints and criteria. Submit its number and alignment rationale with goalplus_tasks, then wait for the result before acting. Revise pending tasks if they drift from the requirements. Reopen an earlier task if it needs repair.",
   "Before advancing a stage or ending this turn, compare the current work against every criterion and constraint. Capture current verification receipts, reuse only still-current evidence and reopen impacted or uncertain items.",
   "Record the stage and next unfinished item with goalplus_checkpoint. Set taskCompleted when the current task is done and verified. For the last task, audit every criterion and constraint with current passing evidence and use goalplus_complete.",
+  "At a stage boundary, call goalplus_checkpoint by itself. If you can estimate the context the next stage will add, include nextStageTokens. Pi may compact before resuming that stage.",
   "If progress depends on a user decision, permission, or unavailable external information, use goalplus_block with the concrete dependency. Ordinary investigation and unfinished work should continue.",
 ].join("\n");
 

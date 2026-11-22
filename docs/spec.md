@@ -21,8 +21,9 @@ display the native extension UI events. Status details must remain readable
 after reload and resume. Selection changes must never substitute another
 history branch's Goal.
 
-Pause prevents additional turns and allows the in-flight turn to settle. Stop
-persists the pause before requesting native cancellation. Resume uses the
+Pause prevents additional turns and allows the in-flight work to settle. Stop
+persists the pause before cancelling the active Goal run or proactive native
+compaction. Resume uses the
 previous requirements and evidence. Clear retires the Goal and keeps the
 conversation and project files.
 
@@ -73,10 +74,26 @@ or stale coverage. The runtime finalizes completion only after successful
 settlement. Model judgment about evidence does not establish factual validity
 by itself. Prefer runnable checks and concrete results.
 
-Native Pi compaction and optional Handoff keep their own compaction policies.
-The next Goal work reads the stored revision and evidence again. Repeated
-rounds need short context and receipt pointers. Older Goal reads appear only
-as references in model requests; their full original results stay in native
+## Proactive compaction
+
+At a checkpoint with more work ahead, or when a successful Goal run settles,
+check Pi's context estimate. Request early compaction when use is strictly
+above 70% and the space left is at most the estimated additional tokens for
+the next stage. A checkpoint can provide `nextStageTokens`. Otherwise, use
+recent measured context growth. Reserve at least one model response in either
+case. Use Pi's ordinary context handling when no estimate is available.
+
+Save the checkpoint and let the run settle before requesting native Pi
+compaction. Give queued user input priority and recheck context to account for
+any native compaction that has already run. After compaction, continue from
+the saved task and read the original requirements and evidence again. Charge
+reported summary usage to the Goal budget before continuing. When compaction
+fails, leave the task available to Pi's normal recovery. Suppress repeat early
+attempts at that stage while usage stays high. Cancellation pauses the Goal.
+
+Native Pi owns summary generation, ordinary threshold checks, and overflow
+recovery. Optional Handoff keeps its explicit invocation. Older Goal reads
+appear as references in model requests. Their original results stay in native
 Pi history.
 
 ## Acceptance
@@ -88,6 +105,7 @@ Pi history.
 | Long task | A task requiring more than three autonomous turns continues without another user message until final acceptance. |
 | Regression | A previously passing criterion goes stale or fails after a later operation. Completion is rejected until that item is reverified. |
 | Compaction | Native compression preserves the Goal and task plan. Resumed work rereads the original requirements and current evidence before aligning the task. |
+| Proactive compaction | A stage forecast that reaches the remaining capacity triggers native compaction above 70%. At 70% or with enough space, the next stage proceeds directly. |
 | Recovery | On pause, stop, resume and reopen, Goal state follows the active session branch. Uncertain work is not silently repeated. |
 | Limits | Provider limits and explicitly configured token budgets display the cause. Goal completion is independent of both. |
 

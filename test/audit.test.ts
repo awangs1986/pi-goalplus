@@ -40,7 +40,9 @@ function nativeTools(options: { constraints?: string[]; auditPending?: boolean }
     write: (_ctx, goal) => { current = goal ?? undefined; }
   };
   let nativeRun: string | undefined = "r1";
-  const runner: GoalRunner = { current: () => nativeRun, request: () => {} };
+  const runner: GoalRunner = {
+    current: () => nativeRun, request: () => {}, beforeNextStage: () => false, compacting: () => false,
+  };
   const tools = new Map<string, Tool>();
   const listeners = new Map<string, (event: unknown, ctx: ExtensionToolContext) => unknown>();
   const pi = {
