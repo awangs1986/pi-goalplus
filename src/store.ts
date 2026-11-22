@@ -5,6 +5,7 @@ import type { Criterion, Goal, GoalDefinition, GoalStore } from "./types.js";
 const ENTRY_TYPE = "pi-goalplus:state";
 const MAX_DEFINITION_BYTES = 32768;
 const MAX_ITEMS = 24;
+export const MAX_CRITERION_TEXT_LENGTH = 1000;
 const statuses = new Set(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]);
 
 export class GoalStateError extends Error {
@@ -45,8 +46,8 @@ function decodeDefinition(value: unknown): GoalDefinition {
     }
     return {
       id: item.id,
-      requirement: text(item.requirement, "The criterion requirement", 1000),
-      verification: text(item.verification, "The verification method", 1000)
+      requirement: text(item.requirement, "The criterion requirement", MAX_CRITERION_TEXT_LENGTH),
+      verification: text(item.verification, "The verification method", MAX_CRITERION_TEXT_LENGTH)
     };
   });
   if (new Set(criteria.map(criterion => criterion.id)).size !== criteria.length) {

@@ -12,6 +12,7 @@ type Frame = {
   method?: string;
   widgetKey?: string;
   widgetLines?: string[];
+  prefill?: string;
   message?: string;
   success?: boolean;
   error?: string;
@@ -123,6 +124,47 @@ async function withPi(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test("accepting the default Goal draft reaches confirmation and starts one turn", async () => {
+  await withPi(async rpc => {
+    const objective = "Fix the launch checks";
+    const start = rpc.command("prompt", { message: "/goal " + objective });
+    const editor = await rpc.wait(frame => frame.method === "editor");
+    rpc.send({ type: "extension_ui_response", id: editor.id, value: editor.prefill });
+    const next = await rpc.wait(frame => frame.method === "confirm" || frame.type === "extension_error");
+    expect(next.method, next.error).toBe("confirm");
+    expect(next.message).toContain("[c1] " + objective);
+    expect(next.message).toMatch(/Verify: \S/);
+    expect(rpc.frames.some(frame => frame.type === "agent_start")).toBe(false);
+    rpc.send({ type: "extension_ui_response", id: next.id, confirmed: true });
+    expect((await start).success).toBe(true);
+    await rpc.wait(frame => frame.type === "agent_settled");
+    expect(rpc.frames.filter(frame => frame.type === "agent_start")).toHaveLength(1);
+  });
+}, 8000);
+
+test("an invalid Goal draft returns to the editor with its changes intact", async () => {
+  await withPi(async rpc => {
+    const start = rpc.command("prompt", { message: "/goal Fix the launch checks" });
+    const editor = await rpc.wait(frame => frame.method === "editor");
+    const invalid = JSON.stringify({
+      ...definition,
+      criteria: [{ ...definition.criteria[0], requirement: "" }]
+    });
+    rpc.send({ type: "extension_ui_response", id: editor.id, value: invalid });
+    const feedback = await rpc.wait(frame => frame.method === "notify" || frame.type === "extension_error");
+    expect(feedback.method, feedback.error).toBe("notify");
+    expect(feedback.message).toContain("criterion requirement");
+    const retry = await rpc.wait(frame => frame.method === "editor" && frame.id !== editor.id);
+    expect(retry.prefill).toBe(invalid);
+    rpc.send({ type: "extension_ui_response", id: retry.id, value: JSON.stringify(definition) });
+    const confirmation = await rpc.wait(frame => frame.method === "confirm");
+    expect(confirmation.message).toContain("The launch check succeeds");
+    rpc.send({ type: "extension_ui_response", id: confirmation.id, confirmed: false });
+    expect((await start).success).toBe(true);
+    expect(rpc.frames.some(frame => frame.type === "agent_start")).toBe(false);
+  });
+}, 8000);
 
 test("reviewing then cancelling saves no Goal and starts no native turn", async () => {
   await withPi(async rpc => {

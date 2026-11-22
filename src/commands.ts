@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { GoalStateError, parseGoalDefinition } from "./store.js";
+import { GoalStateError, MAX_CRITERION_TEXT_LENGTH, parseGoalDefinition } from "./store.js";
 import type { Goal, GoalDefinition, GoalRunner, GoalStore } from "./types.js";
 
 const widgetKey = "pi-goalplus";
@@ -171,14 +171,25 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
       requireIdle(ctx);
     };
     try {
-      const json = await ctx.ui.editor(editing ? "Edit Goal definition" : "Draft Goal requirements", JSON.stringify(draft, null, 2));
-      if (json === undefined) return undefined;
-      requireCurrent();
-      const definition = parseGoalDefinition(json);
-      const confirmed = await ctx.ui.confirm(editing ? "Confirm revised Goal" : "Start this Goal?", reviewText(definition));
-      if (!confirmed) return undefined;
-      requireCurrent();
-      return definition;
+      let prefill = JSON.stringify(draft, null, 2);
+      const title = editing ? "Edit Goal definition" : "Draft Goal requirements";
+      while (true) {
+        const json = await ctx.ui.editor(title, prefill);
+        if (json === undefined) return undefined;
+        requireCurrent();
+        let definition: GoalDefinition;
+        try {
+          definition = parseGoalDefinition(json);
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : "Invalid Goal definition.", "warning");
+          prefill = json;
+          continue;
+        }
+        const confirmed = await ctx.ui.confirm(editing ? "Confirm revised Goal" : "Start this Goal?", reviewText(definition));
+        if (!confirmed) return undefined;
+        requireCurrent();
+        return definition;
+      }
     } finally {
       if (review === token) review = undefined;
     }
@@ -265,7 +276,11 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
         ? parseGoalDefinition(args.slice(5).trim())
         : await reviewDefinition(ctx, {
           objective: args, constraints: [],
-          criteria: [{ id: "c1", requirement: "", verification: "" }]
+          criteria: [{
+            id: "c1",
+            requirement: args.length <= MAX_CRITERION_TEXT_LENGTH ? args : "The confirmed objective is achieved.",
+            verification: "Inspect the result and collect concrete evidence that the objective is met."
+          }]
         }, false);
       if (!definition) return;
       store.write(ctx, initialGoal(definition), "user-confirmed");

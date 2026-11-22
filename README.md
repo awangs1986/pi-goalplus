@@ -20,7 +20,9 @@ command per session.
 ## Use
 
 Type `/goal Keep the migration compatible with existing consumers`. Review the
-editable objective, constraints and criteria and confirm Start. Pi will use
+editable objective, constraints and criteria. The draft includes a criterion
+and a verification step you can accept as written or edit before choosing
+Start. Pi will use
 your current model and start the first turn. The Goal widget above the editor
 shows the objective, current stage, status and acceptance progress.
 
