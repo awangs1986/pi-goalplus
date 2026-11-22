@@ -28,6 +28,13 @@ function count(goal: Goal): string {
   return `${passed}/${goal.criteria.length}`;
 }
 
+function taskLine(goal: Goal): string | undefined {
+  const plan = goal.plan;
+  if (!plan) return goal.status === "active" ? "Planning tasks" : undefined;
+  const number = Math.min(plan.completed + 1, plan.tasks.length);
+  return `Task ${number}/${plan.tasks.length} · ${brief(plan.tasks[number - 1].title, 120)}`;
+}
+
 export function renderGoal(ctx: ExtensionContext, goal: Goal | undefined): void {
   if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
   if (!goal) {
@@ -37,6 +44,8 @@ export function renderGoal(ctx: ExtensionContext, goal: Goal | undefined): void 
   const lines = [
     `Goal [${labels[goal.status]}] · ${count(goal)} verified · ${brief(goal.objective, 150)}`
   ];
+  const task = taskLine(goal);
+  if (task) lines.push(task);
   if (goal.stage) lines.push(`Stage: ${brief(goal.stage, 150)}`);
   if (goal.reason) lines.push(`Reason: ${brief(goal.reason, 150)}`);
   ctx.ui.setWidget(widgetKey, lines, { placement: "aboveEditor" });
@@ -58,6 +67,8 @@ function details(goal: Goal): string {
     `Goal ${labels[goal.status]} · revision ${goal.revision} · ${count(goal)} verified`,
     reviewText(goal)
   ];
+  const task = taskLine(goal);
+  if (task) lines.push(task);
   if (goal.stage) lines.push(`Stage: ${plainLine(goal.stage)}`);
   if (goal.next) lines.push(`Next: ${plainLine(goal.next)}`);
   if (goal.reason) lines.push(`Reason: ${plainLine(goal.reason)}`);
@@ -172,7 +183,7 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
     };
     try {
       let prefill = JSON.stringify(draft, null, 2);
-      const title = editing ? "Edit Goal definition" : "Draft Goal requirements";
+      const title = editing ? "Edit Goal definition" : "Review imported Goal";
       while (true) {
         const json = await ctx.ui.editor(title, prefill);
         if (json === undefined) return undefined;
@@ -271,18 +282,17 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
         throw Error("A Goal already exists. Use /goal edit to change its requirements or /goal clear to remove it.");
       }
       const explicitStart = args === "start" || /^start\s/.test(args);
-      if (args === "start") throw Error("Use /goal start <JSON> with a reviewed definition, or /goal <objective> to open the editor.");
+      if (args === "start") throw Error("Use /goal start <JSON> with a reviewed definition, or /goal <objective> to start directly.");
       const definition = explicitStart
         ? parseGoalDefinition(args.slice(5).trim())
-        : await reviewDefinition(ctx, {
+        : parseGoalDefinition(JSON.stringify({
           objective: args, constraints: [],
           criteria: [{
             id: "c1",
             requirement: args.length <= MAX_CRITERION_TEXT_LENGTH ? args : "The confirmed objective is achieved.",
             verification: "Inspect the result and collect concrete evidence that the objective is met."
           }]
-        }, false);
-      if (!definition) return;
+        }));
       store.write(ctx, initialGoal(definition), "user-confirmed");
       runner.request(ctx);
     }

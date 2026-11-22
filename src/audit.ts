@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { isNativeReadOnly } from "./tool-policy.js";
+import { decodeTaskPlan, MAX_TASKS, MAX_TASK_TITLE_LENGTH, MIN_TASKS } from "./store.js";
+import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
 import type { ConstraintReview, Evidence, Goal, GoalRunner, GoalStore } from "./types.js";
-
-export const GOAL_TOOL_NAMES = ["goalplus_read", "goalplus_checkpoint", "goalplus_complete", "goalplus_block"] as const;
 
 const MAX_RECEIPTS = 64;
 const MAX_ITEMS = 24;
@@ -46,7 +45,17 @@ interface Observation {
 interface RunAudit extends RunBinding {
   receipts: Receipt[];
   read: "unread" | "awaiting-response" | "ready";
+  alignment?: { number: number; ready: boolean };
   observations: Map<string, Observation>;
+}
+
+function requireFreshRead(state: RunAudit): void {
+  state.read = "unread";
+  state.alignment = undefined;
+}
+
+function aligned(state: RunAudit, number: number): boolean {
+  return state.alignment?.number === number && state.alignment.ready;
 }
 
 function toolOutput(value: unknown) {
@@ -127,7 +136,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
     { workspaceChanged = false, reread = false }: { workspaceChanged?: boolean; reread?: boolean } = {}
   ): void {
     if (goal.status === "complete") return;
-    if (state && reread) state.read = "unread";
+    if (state && reread) requireFreshRead(state);
     if (state && workspaceChanged) state.receipts = [];
     if (goal.auditedRunId || goal.completionRunId || (workspaceChanged && (goal.evidence.length || goal.constraintReviews?.length))) {
       store.write(ctx, {
@@ -152,6 +161,13 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
       return { block: true, reason: "Call goalplus_read by itself and use the result in the next assistant response before acting." };
     }
     const mayWrite = !isNativeReadOnly(pi, event.toolName);
+    const plan = state.goal.plan;
+    if (!plan && mayWrite) {
+      return { block: true, reason: "Save an ordered Goal task plan with goalplus_tasks before changing the project." };
+    }
+    if (plan && !aligned(state, plan.completed + 1)) {
+      return { block: true, reason: `Align task ${plan.completed + 1} with the confirmed Goal using goalplus_tasks, and wait for its result before working.` };
+    }
     if (mayWrite && state.goal.auditPending) {
       return { block: true, reason: "Reconcile the missed stage audit with goalplus_checkpoint before making further changes." };
     }
@@ -171,6 +187,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
     if (event.message.role !== "assistant") return;
     const state = runningAudit(binding(ctx));
     if (state?.read === "awaiting-response") state.read = "ready";
+    if (state?.alignment) state.alignment.ready = true;
   });
   pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "user") return;
@@ -214,7 +231,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
   pi.registerTool({
     name: "goalplus_read",
     label: "Read Goal",
-    description: "Read the user's confirmed objective, required criteria and constraints before working. Also lists native verification receipt IDs from this run. Goal state, rather than a stage plan or summary, defines completion.",
+    description: "Read the user's confirmed objective, criteria and constraints, the ordered task plan and progress, and native verification receipts for this run.",
     parameters: Type.Object({}, exact),
     defaultActive: false,
     executionMode: "sequential",
@@ -231,6 +248,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
         objective: goal.objective,
         criteria: goal.criteria,
         constraints: goal.constraints,
+        plan: goal.plan,
         evidence: goal.evidence.map(({ criterionId, verdict, source, observed }) => ({
           criterionId, verdict, source, observed
         })),
@@ -242,20 +260,80 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
     }
   });
   pi.registerTool({
+    name: "goalplus_tasks",
+    label: "Plan and Align Goal Tasks",
+    description: "Save an ordered plan covering the confirmed criteria, or align one task with the original objective, constraints and criteria. Supply either plan or align. Reuse steps the user already specified. Keep completed tasks when revising the plan. Read the Goal again after saving a plan. After aligning, wait for the result before working. Align an earlier task to reopen it and all later tasks for repair.",
+    parameters: Type.Object({
+      ...identity,
+      plan: Type.Optional(Type.Array(Type.Object({
+        title: Type.String({ minLength: 1, maxLength: MAX_TASK_TITLE_LENGTH }),
+        criteria: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { minItems: 1, maxItems: MAX_ITEMS })
+      }, exact), { minItems: MIN_TASKS, maxItems: MAX_TASKS })),
+      align: Type.Optional(Type.Object({
+        number: Type.Integer({ minimum: 1, maximum: MAX_TASKS, description: "1-based task number." }),
+        rationale: Type.String({ minLength: 1, maxLength: 400, description: "Why this task advances the confirmed objective and respects its constraints." })
+      }, exact))
+    }, exact),
+    defaultActive: false,
+    executionMode: "sequential",
+    async execute(_toolCallId, args, _signal, _onUpdate, ctx) {
+      const state = current(ctx, args);
+      const { goal } = state;
+      if (args.plan !== undefined) {
+        if (args.align !== undefined) throw new Error("Submit the plan and align the task in separate calls.");
+        const completed = goal.plan?.completed ?? 0;
+        const plan = decodeTaskPlan({ tasks: args.plan, completed }, goal.criteria);
+        if (completed >= plan.tasks.length || (goal.plan &&
+          JSON.stringify(plan.tasks.slice(0, completed)) !== JSON.stringify(goal.plan.tasks.slice(0, completed)))) {
+          throw new Error("Retain completed tasks in order and include at least one remaining task.");
+        }
+        store.write(ctx, { ...goal, plan, completionRunId: undefined });
+        requireFreshRead(state);
+        return toolOutput({ status: "planned", task: completed + 1, total: plan.tasks.length });
+      }
+      const plan = goal.plan;
+      if (!plan || !args.align) throw new Error("Save a Goal task plan before aligning a task.");
+      const { number, rationale } = args.align;
+      const currentTask = plan.completed + 1;
+      if (number > currentTask) throw new Error(`Finish task ${currentTask} before starting task ${number}.`);
+      nonBlank(rationale, "Explain how the task advances the objective and respects its constraints.");
+      if (number < currentTask) {
+        store.write(ctx, {
+          ...goal, plan: { ...plan, completed: number - 1 }, auditedRunId: undefined, completionRunId: undefined
+        });
+      }
+      state.alignment = { number, ready: false };
+      return toolOutput({ status: "aligned", task: number, total: plan.tasks.length });
+    }
+  });
+  pi.registerTool({
     name: "goalplus_checkpoint",
     label: "Audit Goal Stage",
-    description: "Audit a stage against the confirmed Goal or recheck it before continuing. Include each criterion and constraint once. Pass/fail needs a current native source receipt with output and a short observed result. Shell or unknown tools invalidate previous receipts. Group shell checks in one invocation when needed. Retain only evidence unaffected by later work; final completion needs current receipts for every criterion. Keep evidence descriptions short and omit secrets. Reopen any item whose proof is affected, missing, or uncertain. A passed constraint also requires a current successful source receipt. Mark an uncertain constraint unknown and explain what needs rechecking.",
+    description: "Audit a stage against the confirmed Goal or recheck it before continuing. Include each criterion and constraint once. Set taskCompleted only after finishing and verifying the current task. Finish the last task with goalplus_complete after its final audit. Pass/fail needs a current native source receipt with output and a short observed result. Shell or unknown tools invalidate previous receipts. Group shell checks in one invocation when needed. Retain only evidence unaffected by later work. Keep evidence descriptions short and omit secrets. Reopen any item whose proof is affected, missing, or uncertain. A passed constraint requires a current successful source receipt. Mark an uncertain constraint unknown and explain what needs rechecking.",
     parameters: Type.Object({
       ...identity,
       stage: Type.String({ minLength: 1, maxLength: 240 }),
       next: Type.Optional(Type.String({ minLength: 1, maxLength: 400 })),
+      taskCompleted: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TASKS })),
       criteria: Type.Array(criterionReport, { minItems: 1, maxItems: MAX_ITEMS }),
       constraints: Type.Array(constraintReport, { maxItems: MAX_ITEMS })
     }, exact),
     defaultActive: false,
     executionMode: "sequential",
     async execute(_toolCallId, args, _signal, _onUpdate, ctx) {
-      const { goal, runId, receipts } = current(ctx, args);
+      const state = current(ctx, args);
+      const { goal, runId, receipts } = state;
+      let plan = goal.plan;
+      const taskCompleted = args.taskCompleted;
+      if (taskCompleted !== undefined) {
+        if (!plan || taskCompleted !== plan.completed + 1 || !aligned(state, taskCompleted)) {
+          throw new Error("Finish the current aligned task before recording task progress.");
+        }
+        if (taskCompleted === plan.tasks.length) {
+          throw new Error("Audit the final task, then finish it with goalplus_complete.");
+        }
+        plan = { ...plan, completed: taskCompleted };
+      }
       const stage = nonBlank(args.stage, "Provide a stage name.");
       const next = args.next === undefined ? undefined : nonBlank(args.next, "Provide a concrete next step or omit it.");
       const criterionReports = ordered(args.criteria, goal.criteria.map((item) => item.id), (item) => item.id, "criteria");
@@ -302,6 +380,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
       }
       store.write(ctx, {
         ...goal,
+        plan,
         stage,
         next,
         evidence,
@@ -310,6 +389,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
         auditedRunId: runId,
         completionRunId: undefined
       });
+      if (taskCompleted !== undefined) requireFreshRead(state);
       return toolOutput({
         status: "audited",
         runId,
@@ -323,14 +403,19 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
   pi.registerTool({
     name: "goalplus_complete",
     label: "Propose Goal Completion",
-    description: "After the final audit, request completion only if every confirmed criterion and constraint has current passing evidence. Call as the last action of this run. Pi settles the run before it records completion.",
+    description: "Finish the final aligned task after the final audit. Earlier tasks must be complete, and every confirmed criterion and constraint must have current passing evidence. Call as the last action of this run. Pi settles the run before it records completion.",
     parameters: Type.Object(identity, exact),
     defaultActive: false,
     executionMode: "sequential",
     async execute(_toolCallId, args, _signal, _onUpdate, ctx) {
-      const { goal, runId, receipts } = current(ctx, args);
+      const state = current(ctx, args);
+      const { goal, runId, receipts } = state;
       if (goal.auditedRunId !== runId) {
         throw new Error("Audit all confirmed criteria and constraints in this turn before proposing completion.");
+      }
+      const plan = goal.plan;
+      if (!plan || plan.completed + 1 !== plan.tasks.length || !aligned(state, plan.tasks.length)) {
+        throw new Error("Complete earlier tasks and align the final task before proposing Goal completion.");
       }
       const missing = goal.criteria.find(({ id }) => !goal.evidence.some(
         (evidence) => evidence.criterionId === id && evidence.verdict === "pass" &&
@@ -373,10 +458,6 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
       return toolOutput({ status: "blocked", dependency: args.dependency, reason });
     }
   });
-}
-
-function isGoalTool(name: string): boolean {
-  return GOAL_TOOL_NAMES.some((tool) => tool === name);
 }
 
 function nonBlank(value: string | undefined, error: string): string {

@@ -1,11 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createLocalAuthority } from "./local-authority.js";
-import type { Criterion, Goal, GoalDefinition, GoalStore } from "./types.js";
+import type { Criterion, Goal, GoalDefinition, GoalPlan, GoalStore } from "./types.js";
 
 const ENTRY_TYPE = "pi-goalplus:state";
 const MAX_DEFINITION_BYTES = 32768;
 const MAX_ITEMS = 24;
 export const MAX_CRITERION_TEXT_LENGTH = 1000;
+export const MIN_TASKS = 2;
+export const MAX_TASKS = 24;
+export const MAX_TASK_TITLE_LENGTH = 160;
 const statuses = new Set(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]);
 
 export class GoalStateError extends Error {
@@ -87,6 +90,33 @@ export function parseGoalDefinition(json: string): GoalDefinition {
   return definition;
 }
 
+export function decodeTaskPlan(value: unknown, criteria: Criterion[]): GoalPlan {
+  if (!isRecord(value) || !Array.isArray(value.tasks) || value.tasks.length < MIN_TASKS || value.tasks.length > MAX_TASKS) {
+    throw Error(`A Goal task plan needs ${MIN_TASKS}–${MAX_TASKS} ordered tasks.`);
+  }
+  const completed = value.completed;
+  if (!wholeNumber(completed, 0) || completed > value.tasks.length) throw Error("Invalid task progress.");
+  const ids = new Set(criteria.map(({ id }) => id));
+  const covered = new Set<string>();
+  const tasks = value.tasks.map((item: unknown) => {
+    if (!isRecord(item) || !Array.isArray(item.criteria) || !item.criteria.length || item.criteria.length > ids.size) {
+      throw Error("Each task must name the confirmed criteria it advances.");
+    }
+    const title = text(item.title, "The task title", MAX_TASK_TITLE_LENGTH);
+    const taskCriteria = new Set<string>();
+    for (const id of item.criteria) {
+      if (typeof id !== "string" || !ids.has(id) || taskCriteria.has(id)) {
+        throw Error("Use unique, confirmed criterion IDs for each task.");
+      }
+      taskCriteria.add(id);
+      covered.add(id);
+    }
+    return { title, criteria: [...taskCriteria] };
+  });
+  if (covered.size !== ids.size) throw Error("The task plan must cover every confirmed criterion.");
+  return { tasks, completed };
+}
+
 function decodeSnapshot(value: unknown): Goal | undefined {
   if (!isRecord(value) || value.schema !== 1) throw new GoalStateError();
   if (value.goal === null) return undefined;
@@ -119,8 +149,13 @@ function decodeSnapshot(value: unknown): Goal | undefined {
     throw new GoalStateError();
   }
   let definition: GoalDefinition;
+  let plan: GoalPlan | undefined;
   try {
     definition = decodeDefinition(goal);
+    if (goal.plan !== undefined) {
+      plan = decodeTaskPlan(goal.plan, definition.criteria);
+      if ((goal.status === "complete") !== (plan.completed === plan.tasks.length)) throw new GoalStateError();
+    }
   } catch {
     throw new GoalStateError();
   }
@@ -144,7 +179,7 @@ function decodeSnapshot(value: unknown): Goal | undefined {
         (typeof item.source !== "string" || !item.source.trim() || !digest(item.fingerprint))
     )) throw new GoalStateError();
   }
-  return { ...goal, ...definition } as Goal;
+  return { ...goal, ...definition, plan } as Goal;
 }
 
 function unconfirmed(goal: Goal): Goal {

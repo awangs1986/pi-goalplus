@@ -1,16 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { AgentActivityOutcome, ExtensionAPI, ExtensionContext, SessionEntry, ToolResultEvent } from "@earendil-works/pi-coding-agent";
-import { isNativeReadOnly } from "./tool-policy.js";
+import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
 import type { Dispatch, Goal, GoalRunner, GoalStore } from "./types.js";
 
 const TRIGGER = "pi-goalplus-run";
 const NO_PROGRESS_LIMIT = 3;
 const SAFE_RETRY_DELAYS = [250, 1000];
-const RECENT_EVIDENCE_LIMIT = 128;
+const RECENT_PROGRESS_LIMIT = 128;
 const RECENT_ACTIVITY_LIMIT = 128;
 const START_ACK_TIMEOUT = 30_000;
-const GOAL_CONTROLS = new Set(["goalplus_read", "goalplus_checkpoint", "goalplus_complete", "goalplus_block"]);
 const VOLATILE_RESULT_FIELDS = /^(?:timestamp|(?:request|response|toolCall|trace|span)_?id|(?:created|updated|started|finished)_?at|(?:elapsed|duration)(?:_?ms)?)$/i;
 
 interface NativeRun {
@@ -18,7 +17,7 @@ interface NativeRun {
   goalId: string;
   revision: number;
   id: string;
-  startEvidence: string;
+  startProgress: string;
   activity: Set<string>;
   initialPrompt?: string;
   started: boolean;
@@ -28,12 +27,12 @@ interface NativeRun {
   possibleEffects?: boolean;
 }
 
-function evidenceKey(goal: Goal): string {
+function progressKey(goal: Goal): string {
   const items = goal.evidence.map(item => [
     item.criterionId, item.verdict, item.fingerprint ?? null,
   ]);
   items.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-  return createHash("sha256").update(JSON.stringify(items)).digest("hex");
+  return createHash("sha256").update(JSON.stringify([goal.plan?.completed ?? null, items])).digest("hex");
 }
 
 function editKey(value: unknown): string | undefined {
@@ -62,7 +61,7 @@ function stableResult(value: unknown): string | undefined {
 
 function outcomeKey(event: ToolResultEvent, cwd: string, builtin: boolean): string | undefined {
   const { input, toolName } = event;
-  if (event.isError || GOAL_CONTROLS.has(toolName)) return;
+  if (event.isError || isGoalTool(toolName)) return;
   const digest = createHash("sha256").update(JSON.stringify([toolName]));
   if (builtin && typeof input.path === "string" && input.path &&
     (toolName === "edit" || toolName === "write" || toolName === "read")) {
@@ -238,7 +237,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     });
     const candidate: NativeRun = {
       sessionId, goalId: goal.id, revision: goal.revision, id,
-      startEvidence: evidenceKey(goal), activity: new Set(), initialPrompt, started: false,
+      startProgress: progressKey(goal), activity: new Set(), initialPrompt, started: false,
     };
     run = candidate;
     watchStart(ctx, candidate);
@@ -341,7 +340,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
   });
 
   pi.on("tool_execution_start", event => {
-    if (run?.started && !GOAL_CONTROLS.has(event.toolName) &&
+    if (run?.started && !isGoalTool(event.toolName) &&
       !isNativeReadOnly(pi, event.toolName)) run.possibleEffects = true;
   });
   pi.on("tool_result", (event, ctx) => {
@@ -477,20 +476,21 @@ function decideNext(goal: Goal, next: Goal, run: NativeRun, aborted: boolean): n
   next.reason = undefined;
   if (goal.completionRunId === run.id && goal.auditedRunId === run.id) {
     next.status = "complete";
+    if (goal.plan) next.plan = { ...goal.plan, completed: goal.plan.tasks.length };
     return 0;
   }
-  const observed = evidenceKey(goal);
-  const seen = new Set([...(goal.progressSeen ?? []), run.startEvidence]);
+  const observed = progressKey(goal);
+  const seen = new Set([...(goal.progressSeen ?? []), run.startProgress]);
   const activities = new Set(goal.activitySeen ?? []);
   const progress = !seen.has(observed) || [...run.activity].some(key => !activities.has(key));
   for (const key of run.activity) activities.add(key);
   seen.add(observed);
-  next.progressSeen = [...seen].slice(-RECENT_EVIDENCE_LIMIT);
+  next.progressSeen = [...seen].slice(-RECENT_PROGRESS_LIMIT);
   next.activitySeen = [...activities].slice(-RECENT_ACTIVITY_LIMIT);
   next.noProgress = progress ? 0 : goal.noProgress + 1;
   if (next.noProgress >= NO_PROGRESS_LIMIT) {
     next.status = "blocked";
-    next.reason = "Three consecutive runs produced no new verification evidence or useful tool outcomes. Review the obstacles and resume when another check or approach is available.";
+    next.reason = "Three consecutive runs produced no task progress, new verification evidence or useful tool outcomes. Review the obstacles and resume when another check or approach is available.";
   }
   return progress ? 0 : next.noProgress * 150;
 }

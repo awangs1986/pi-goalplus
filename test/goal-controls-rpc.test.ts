@@ -125,27 +125,27 @@ async function withPi(
   }
 }
 
-test("accepting the default Goal draft reaches confirmation and starts one turn", async () => {
+test("submitting /goal with an objective starts one turn immediately", async () => {
   await withPi(async rpc => {
     const objective = "Fix the launch checks";
-    const start = rpc.command("prompt", { message: "/goal " + objective });
-    const editor = await rpc.wait(frame => frame.method === "editor");
-    rpc.send({ type: "extension_ui_response", id: editor.id, value: editor.prefill });
-    const next = await rpc.wait(frame => frame.method === "confirm" || frame.type === "extension_error");
-    expect(next.method, next.error).toBe("confirm");
-    expect(next.message).toContain("[c1] " + objective);
-    expect(next.message).toMatch(/Verify: \S/);
-    expect(rpc.frames.some(frame => frame.type === "agent_start")).toBe(false);
-    rpc.send({ type: "extension_ui_response", id: next.id, confirmed: true });
-    expect((await start).success).toBe(true);
+    rpc.send({ type: "prompt", id: "direct-goal", message: "/goal " + objective });
+    const next = await rpc.wait(frame => frame.type === "agent_start" || frame.type === "extension_error" ||
+      frame.method === "editor" || frame.method === "confirm");
+    expect(next.type, next.error ?? next.method).toBe("agent_start");
+    expect((await rpc.wait(frame => frame.type === "response" && frame.id === "direct-goal")).success).toBe(true);
     await rpc.wait(frame => frame.type === "agent_settled");
+    await rpc.command("prompt", { message: "/goal status" });
+    const status = await rpc.wait(frame => frame.method === "notify" && frame.message?.includes(objective) === true);
+    expect(status.message).toContain("[c1] " + objective);
     expect(rpc.frames.filter(frame => frame.type === "agent_start")).toHaveLength(1);
   });
 }, 8000);
 
-test("an invalid Goal draft returns to the editor with its changes intact", async () => {
+test("an invalid definition edit returns to the editor with its changes intact", async () => {
   await withPi(async rpc => {
-    const start = rpc.command("prompt", { message: "/goal Fix the launch checks" });
+    await rpc.command("prompt", { message: `/goal start ${JSON.stringify(definition)}` });
+    await rpc.wait(frame => frame.type === "agent_settled");
+    const edit = rpc.command("prompt", { message: "/goal edit" });
     const editor = await rpc.wait(frame => frame.method === "editor");
     const invalid = JSON.stringify({
       ...definition,
@@ -161,19 +161,17 @@ test("an invalid Goal draft returns to the editor with its changes intact", asyn
     const confirmation = await rpc.wait(frame => frame.method === "confirm");
     expect(confirmation.message).toContain("The launch check succeeds");
     rpc.send({ type: "extension_ui_response", id: confirmation.id, confirmed: false });
-    expect((await start).success).toBe(true);
-    expect(rpc.frames.some(frame => frame.type === "agent_start")).toBe(false);
+    expect((await edit).success).toBe(true);
+    await rpc.command("prompt", { message: "/goal status" });
+    await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("revision 1") === true);
+    expect(rpc.frames.filter(frame => frame.type === "agent_start")).toHaveLength(1);
   });
 }, 8000);
 
-test("reviewing then cancelling saves no Goal and starts no native turn", async () => {
+test("an invalid direct objective fails before saving a Goal or starting a turn", async () => {
   await withPi(async rpc => {
-    const start = rpc.command("prompt", { message: "/goal Fix the launch checks" });
-    const editor = await rpc.wait(frame => frame.method === "editor");
-    rpc.send({ type: "extension_ui_response", id: editor.id, value: JSON.stringify(definition) });
-    const confirmation = await rpc.wait(frame => frame.method === "confirm");
-    rpc.send({ type: "extension_ui_response", id: confirmation.id, confirmed: false });
-    expect((await start).success).toBe(true);
+    await rpc.command("prompt", { message: "/goal " + "x".repeat(4001) });
+    await rpc.wait(frame => frame.type === "extension_error" && frame.error?.includes("objective") === true);
     expect((await rpc.command("prompt", { message: "/goal status" })).success).toBe(true);
     await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("No Goal") === true);
     expect(rpc.frames.some(frame => frame.type === "agent_start")).toBe(false);
@@ -182,14 +180,7 @@ test("reviewing then cancelling saves no Goal and starts no native turn", async 
 
 test("a confirmed Goal starts one turn and a native session switch restores its requirements", async () => {
   await withPi(async rpc => {
-    const start = rpc.command("prompt", { message: "/goal Fix the launch checks" });
-    const editor = await rpc.wait(frame => frame.method === "editor");
-    rpc.send({ type: "extension_ui_response", id: editor.id, value: JSON.stringify(definition) });
-    const confirmation = await rpc.wait(frame => frame.method === "confirm");
-    expect(confirmation.message).toContain("The launch check succeeds");
-    expect(confirmation.message).toContain("Run npm run check");
-    rpc.send({ type: "extension_ui_response", id: confirmation.id, confirmed: true });
-    expect((await start).success).toBe(true);
+    expect((await rpc.command("prompt", { message: `/goal start ${JSON.stringify(definition)}` })).success).toBe(true);
     await rpc.wait(frame => frame.type === "agent_settled");
     const session = await rpc.command("get_state");
     expect(session.data?.sessionFile).toMatch(/\.jsonl$/);
@@ -242,21 +233,25 @@ test("an exhausted Goal cannot resume until a user revises its budget", async ()
   });
 }, 8000);
 
-test("a late confirmation cannot replace a separately started Goal", async () => {
+test("a late edit confirmation cannot replace a separately started Goal", async () => {
   await withPi(async rpc => {
-    const staleStart = rpc.command("prompt", { message: "/goal Stale draft" });
+    await rpc.command("prompt", { message: "/goal Initial Goal" });
+    await rpc.wait(frame => frame.type === "agent_settled");
+    const staleEdit = rpc.command("prompt", { message: "/goal edit" });
     const editor = await rpc.wait(frame => frame.method === "editor");
     const stale = { ...definition, objective: "Stale draft" };
     rpc.send({ type: "extension_ui_response", id: editor.id, value: JSON.stringify(stale) });
     const confirmation = await rpc.wait(frame => frame.method === "confirm");
+    const firstSettled = await rpc.wait(frame => frame.type === "agent_settled");
+    await rpc.command("prompt", { message: "/goal clear" });
     expect((await rpc.command("prompt", { message: `/goal start ${JSON.stringify(definition)}` })).success).toBe(true);
-    await rpc.wait(frame => frame.type === "agent_settled");
+    await rpc.wait(frame => frame !== firstSettled && frame.type === "agent_settled");
     rpc.send({ type: "extension_ui_response", id: confirmation.id, confirmed: true });
-    expect((await staleStart).success).toBe(true);
+    expect((await staleEdit).success).toBe(true);
     await rpc.wait(frame => frame.type === "extension_error" && frame.error?.includes("session changed") === true);
     expect((await rpc.command("prompt", { message: "/goal status" })).success).toBe(true);
     await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("Fix the launch checks") === true);
-    expect(rpc.frames.filter(frame => frame.type === "agent_start")).toHaveLength(1);
+    expect(rpc.frames.filter(frame => frame.type === "agent_start")).toHaveLength(2);
   });
 }, 8000);
 

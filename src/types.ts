@@ -13,6 +13,14 @@ export interface GoalDefinition {
   criteria: Criterion[];
   budgetTokens?: number;
 }
+export interface GoalTask {
+  title: string;
+  criteria: string[];
+}
+export interface GoalPlan {
+  tasks: GoalTask[];
+  completed: number;
+}
 export interface Evidence {
   criterionId: string;
   verdict: "pass" | "fail";
@@ -42,6 +50,7 @@ export interface Goal extends GoalDefinition {
   needsReview?: true;
   revision: number;
   status: GoalStatus;
+  plan?: GoalPlan;
   evidence: Evidence[];
   constraintReviews?: ConstraintReview[];
   stage?: string;

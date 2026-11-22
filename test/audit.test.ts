@@ -17,6 +17,13 @@ function nativeTools(options: { constraints?: string[]; auditPending?: boolean }
       { id: "build", requirement: "Build succeeds", verification: "npm run build" },
       { id: "smoke", requirement: "Smoke test succeeds", verification: "npm run smoke" }
     ],
+    plan: {
+      tasks: [
+        { title: "Implement the build and smoke checks", criteria: ["build", "smoke"] },
+        { title: "Verify the build and smoke checks", criteria: ["build", "smoke"] }
+      ],
+      completed: 1
+    },
     status: "active",
     evidence: [],
     ...(options.auditPending ? { auditPending: true } : {}),
@@ -69,9 +76,14 @@ function nativeTools(options: { constraints?: string[]; auditPending?: boolean }
   function nextAssistant() {
     event("message_start", { message: { role: "assistant" } });
   }
+  async function align(scope = identity) {
+    await call("tasks", { ...scope, align: { number: 2, rationale: "Verify both original required checks." } });
+    nextAssistant();
+  }
   async function begin() {
     const goal = await call("read");
     nextAssistant();
+    await align({ goalId: goal.goalId, revision: goal.revision, runId: goal.runId });
     return goal;
   }
   function settle() {
@@ -83,7 +95,7 @@ function nativeTools(options: { constraints?: string[]; auditPending?: boolean }
     if (current) current = { ...current, dispatch: { id: nativeRun, revision: current.revision, phase: "running" } };
     return { ...identity, runId: nativeRun };
   }
-  return { call, begin, nextAssistant, event, receipt, identity, settle, nextRun };
+  return { call, begin, align, nextAssistant, event, receipt, identity, settle, nextRun };
 }
 
 describe("GoalPlus native evidence tools", () => {
@@ -167,6 +179,7 @@ describe("GoalPlus native evidence tools", () => {
     expect(pi.event("tool_call", bash)).toMatchObject({ block: true });
     await pi.begin();
     expect(pi.event("tool_call", bash)).toBeUndefined();
+    pi.event("tool_execution_end", bash);
     await pi.event("session_compact", {});
     expect(pi.event("tool_call", bash)).toMatchObject({ block: true });
     expect(await pi.begin()).toMatchObject({ goalId: "user-goal", revision: 2 });
@@ -306,6 +319,8 @@ describe("GoalPlus native evidence tools", () => {
       ...pi.identity, stage: "Premature audit", criteria: [{ id: "build", state: "reopen" }, { id: "smoke", state: "reopen" }], constraints
     })).rejects.toThrow(/read|response/i);
     pi.nextAssistant();
+    expect(pi.event("tool_call", nativeRead)).toMatchObject({ block: true, reason: expect.stringMatching(/align task 2/i) });
+    await pi.align();
     expect(pi.event("tool_call", nativeRead)).toBeUndefined();
   });
 

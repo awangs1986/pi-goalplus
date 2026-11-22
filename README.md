@@ -19,17 +19,21 @@ command per session.
 
 ## Use
 
-Type `/goal Keep the migration compatible with existing consumers`. Review the
-editable objective, constraints and criteria. The draft includes a criterion
-and a verification step you can accept as written or edit before choosing
-Start. Pi will use
-your current model and start the first turn. The Goal widget above the editor
-shows the objective, current stage, status and acceptance progress.
+Submit `/goal Keep the migration compatible with existing consumers` to start
+immediately with your current model. Use `/goal start <JSON>` when you want to
+specify acceptance criteria, constraints, or a token budget up front.
+
+GoalPlus saves an ordered task plan before making project changes. Pi reuses
+steps you provide, or splits the objective into concrete tasks. Before each
+task, Pi reads the original requirements and explains how the task advances the
+objective and respects its constraints. The widget shows the current task as
+`Task 2/5`, alongside the objective and acceptance progress. The plan and
+progress survive compaction and session reopen.
 
 | Command | Action |
 | --- | --- |
 | `/goal` or `/goal status` | Show the saved requirements and current progress. |
-| `/goal <objective>` | Draft and confirm a Goal in a dialog-capable session. |
+| `/goal <objective>` | Start a Goal immediately with the given objective. |
 | `/goal start <JSON>` | Start an explicitly approved structured Goal from a client without a dialog. |
 | `/goal edit` or `/goal edit <JSON>` | Confirm or explicitly submit a new revision of the saved requirements. |
 | `/goal pause` | Let the current run settle and pause new Goal turns. |
@@ -57,11 +61,11 @@ Goal.
 
 ## Evidence and compaction
 
-Goal turns read the confirmed requirements before using tools. A stage
-checkpoint accounts for every criterion and records native tool receipts that
-support the verdicts. A completion proposal is tied to the current confirmed
-revision and run. Later changes can invalidate evidence, and Pi must settle
-successfully before completion is final.
+Goal turns read the confirmed requirements before using tools. A checkpoint
+accounts for every criterion and constraint and records native tool receipts
+that support the verdicts. Pi can reopen earlier tasks for repairs. The final
+task finishes once the current revision passes its acceptance audit and the
+native run settles successfully.
 
 Native Pi owns compaction. GoalPlus keeps the Goal in separate native session
 entries, so the next turn retrieves the same confirmed requirements even if

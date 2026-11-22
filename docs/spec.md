@@ -6,15 +6,17 @@ provider, tools and approvals. It can be installed in an ordinary Pi setup.
 
 ## Start and control a Goal
 
-A Goal starts only after explicit confirmation of its objective, constraints
-and acceptance criteria. The user can draft those in Pi, or bring requirements
-from a PRD. Plain prompts never start a Goal. Only user commands can revise or
-clear the confirmed requirements. A revision reopens any criteria it may affect.
+Submitting `/goal <objective>` authorizes immediate start and sets the original
+objective. GoalPlus derives an acceptance criterion from that objective. The
+user can submit structured requirements, including constraints, criteria and
+an optional token budget, through `/goal start <JSON>`. Plain prompts leave Goal
+creation to the explicit command. Only user commands can revise or clear the
+confirmed requirements. A revision resets the plan and reopens acceptance.
 
 A session has at most one current Goal per selected history branch. Persist the
-confirmed requirements, latest progress, evidence and dispatch state in native
-session entries outside the model's working context. The default Pi widget
-shows the objective, stage, current status and passed/total. RPC clients can
+confirmed requirements, task plan, progress, evidence and dispatch state in
+native session entries. The Pi widget shows the objective, stage, status,
+acceptance progress and current task number over the total. RPC clients can
 display the native extension UI events. Status details must remain readable
 after reload and resume. Selection changes must never substitute another
 history branch's Goal.
@@ -46,12 +48,23 @@ provider call already in progress can use more tokens before usage is known.
 
 ## Stage and final audits
 
-Each started Goal turn reads the confirmed revision before taking other
-actions. At the end of a stage and before advancing, review every criterion and
-constraint and verify affected items. Reopen any that fail or have unclear
-evidence after later changes. Record a short stage and next item, evidence
-references and current verdicts. The maintenance of a progress note alone
-does not constitute progress.
+Each Goal turn reads the confirmed revision. Before changing the project,
+save an ordered plan of 2–24 tasks that covers every acceptance criterion.
+Preserve the user's steps if supplied. Pi can inspect requirements using
+native read-only tools while planning. The plan may keep completed tasks and
+revise pending ones as work reveals new facts.
+
+Before starting or resuming a task, Pi compares it with the original objective,
+constraints and criteria and submits an alignment rationale. GoalPlus waits for
+the model to receive that result before allowing task work. After planning,
+advancing a task, compaction, or user steering, Pi reads the requirements again
+and aligns the current task. Reopening an earlier task for repair also reopens
+the later tasks.
+
+Checkpoint each completed task against every criterion and constraint, verify
+affected items, and reopen those with failed or unclear evidence. Record a
+short stage, evidence references and current verdicts. The final task finishes
+with Goal completion after the final audit and successful settlement.
 
 A completion proposal must refer to the active Goal, its confirmed revision
 and the current run. It must include current acceptance coverage and passing
@@ -70,10 +83,11 @@ Pi history.
 
 | Scenario | Expected behavior |
 | --- | --- |
-| Explicit start and view | A confirmed Goal starts one turn. Native UI shows objective, stage and progress. Ordinary prompts never create a Goal. |
+| Explicit start and view | Submitting `/goal <objective>` immediately starts one turn. Ordinary prompts leave Goal creation to the command. |
+| Plan and task progress | Work begins with an ordered plan. Each task is aligned to the original requirements before execution. The widget shows `Task 1/2` and advances to `Task 2/2` at the next task. |
 | Long task | A task requiring more than three autonomous turns continues without another user message until final acceptance. |
 | Regression | A previously passing criterion goes stale or fails after a later operation. Completion is rejected until that item is reverified. |
-| Compaction | Native compression preserves the durable goal; resumed work re-reads the original requirements and current evidence before taking action. |
+| Compaction | Native compression preserves the Goal and task plan. Resumed work rereads the original requirements and current evidence before aligning the task. |
 | Recovery | On pause, stop, resume and reopen, Goal state follows the active session branch. Uncertain work is not silently repeated. |
 | Limits | Provider limits and explicitly configured token budgets display the cause. Goal completion is independent of both. |
 

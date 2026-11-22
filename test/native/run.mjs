@@ -15,8 +15,14 @@ const goal = {
     { id: "B", requirement: "b.txt contains verified-b", verification: "Read b.txt" },
   ],
 };
+const tasks = [
+  { title: "Fix and verify a.txt", criteria: ["A"] },
+  { title: "Fix b.txt and verify both fixtures", criteria: ["A", "B"] },
+];
+const unverified = goal.criteria.map(({ id }) => ({ id, state: "reopen" }));
 try {
   const installed = await install();
+  await orderedTasks(installed);
   await longGoal(installed);
   await parallelEvidence(installed);
   await compactAndRestore(installed, false);
@@ -63,8 +69,20 @@ function readScope(body) {
   return { goalId: value.goalId, revision: value.revision, runId: value.runId };
 }
 
-function checkpoint(scope, stage, criteria) {
-  return { tool: "goalplus_checkpoint", args: { ...scope, stage, criteria, constraints: [] } };
+function checkpoint(scope, stage, criteria, taskCompleted) {
+  return { tool: "goalplus_checkpoint", args: { ...scope, stage, criteria, constraints: [], taskCompleted } };
+}
+
+function planTasks(scope, plan = tasks) {
+  return { tool: "goalplus_tasks", args: { ...scope, plan } };
+}
+
+function alignTask(scope, number) {
+  return { tool: "goalplus_tasks", args: { ...scope, align: { number, rationale: tasks[number - 1].title + " as required by the original fixture Goal." } } };
+}
+
+function write(path, content) {
+  return { tool: "write", args: { path, content } };
 }
 
 function verified(id, state, body, observed) {
@@ -79,6 +97,80 @@ function strip(rpc, patterns) {
     patterns.every(pattern => pattern.test(JSON.stringify(event))));
 }
 
+async function orderedTasks(installed) {
+  let scope, a;
+  const actions = [
+    readGoal,
+    body => { scope = readScope(body); return write("a.txt", "unplanned work"); },
+    body => {
+      assert.match(lastTool(body)?.text, /task plan/i, "work must wait for a plan");
+      return planTasks(scope, [tasks[0], { title: "Repeat the first check", criteria: ["A"] }]);
+    },
+    body => {
+      assert.match(lastTool(body)?.text, /cover every confirmed criterion/i);
+      return planTasks(scope);
+    },
+    () => readGoal(),
+    body => {
+      assert.deepEqual(JSON.parse(lastTool(body).text).plan, { tasks, completed: 0 });
+      return alignTask(scope, 2);
+    },
+    body => {
+      assert.match(lastTool(body)?.text, /task 1/i, "steps cannot be skipped");
+      return { tools: [alignTask(scope, 1), write("a.txt", "premature work")] };
+    },
+    body => {
+      assert.match(lastTool(body)?.text, /align|goalplus_tasks/i, "alignment must be seen before work starts");
+      return write("a.txt", "verified-a");
+    },
+    () => read("a.txt"),
+    body => checkpoint(scope, "Verified A", [verified("A", "pass", body, "verified-a"), unverified[1]], 1),
+    () => write("b.txt", "premature second task"),
+    body => {
+      assert.match(lastTool(body)?.text, /goalplus_read/i, "each new task must re-read the Goal");
+      return readGoal();
+    },
+    body => {
+      assert.equal(JSON.parse(lastTool(body).text).plan.completed, 1);
+      return alignTask(scope, 2);
+    },
+    () => write("b.txt", "verified-b"),
+    () => read("a.txt"),
+    body => { a = verified("A", "pass", body, "verified-a"); return read("b.txt"); },
+    body => checkpoint(scope, "Verified both fixtures", [a, verified("B", "pass", body, "verified-b")]),
+    () => ({ tool: "goalplus_complete", args: scope }),
+    body => {
+      assert.match(lastTool(body)?.text, /completionProposed/);
+      return { text: "Both fixture tasks finished successfully." };
+    },
+  ];
+  const server = await modelServer(body => {
+    const action = actions.shift();
+    assert.ok(action, "Goal must stop once every task and criterion is verified");
+    return action(body);
+  });
+  let rpc;
+  try {
+    const fixture = await rpcFixture(join(scratch, "tasks"), installed.cli, installed.packages, server.baseUrl);
+    rpc = fixture.launch();
+    await rpc.command("prompt", { message: "/goal start " + JSON.stringify(goal) });
+    const done = await until(() => {
+      server.assertHealthy();
+      return strip(rpc, [/\[Complete\]/, /Task 2\/2/]);
+    }, "completed Goal with task progress");
+    assert.ok(strip(rpc, [/Task 1\/2/, /Fix and verify a\.txt/]));
+    assert.ok(strip(rpc, [/\[Active\]/, /Task 2\/2/, /Fix b\.txt/]));
+    assert.match(JSON.stringify(done), /2\/2 verified/);
+    assert.equal(await readFile(join(fixture.cwd, "a.txt"), "utf8"), "verified-a");
+    assert.equal(await readFile(join(fixture.cwd, "b.txt"), "utf8"), "verified-b");
+    assert.equal(actions.length, 0);
+    console.log("PASS native Goal task plan, per-task alignment, and 1/2 → 2/2 progress");
+  } finally {
+    if (rpc) await rpc.close();
+    await server.close();
+  }
+}
+
 async function longGoal(installed) {
   let scope, a, b;
   const seenRuns = new Set();
@@ -91,18 +183,21 @@ async function longGoal(installed) {
       assert.doesNotMatch(lastTool(body).text, /verified-a/);
       return readGoal();
     },
-    body => { open(body); return { text: "I will verify both criteria." }; },
+    body => { open(body); return planTasks(scope); },
+    () => ({ text: "I planned the fixture checks." }),
     readGoal,
-    body => { open(body); return { tool: "write", args: { path: "a.txt", content: "advance-before-audit" } }; },
+    body => beginTask(body, 1),
+    () => write("a.txt", "advance-before-audit"),
     body => {
       assert.equal(lastTool(body)?.name, "write");
       assert.match(lastTool(body).text, /audit|checkpoint/i);
       return read("a.txt");
     },
-    body => checkpoint(scope, "Check A", [verified("A", "pass", body, "verified-a"), { id: "B", state: "reopen" }]),
+    body => checkpoint(scope, "Check A", [verified("A", "pass", body, "verified-a"), unverified[1]], 1),
     okayCheckpoint,
     // Later work breaks A. The broken work must not complete, even after A used to pass.
-    readGoal, body => { open(body); return { tool: "write", args: { path: "a.txt", content: "broken-a" } }; },
+    readGoal, body => beginTask(body, 2),
+    () => write("a.txt", "broken-a"),
     () => read("a.txt"),
     body => checkpoint(scope, "Detect regression", [verified("A", "fail", body, "broken-a"), { id: "B", state: "reopen" }]),
     body => { assert.equal(lastTool(body)?.name, "goalplus_checkpoint"); return { tool: "goalplus_complete", args: scope }; },
@@ -112,11 +207,13 @@ async function longGoal(installed) {
       assert.match(verdict.text, /current|not|requires|cannot|fail/i);
       return { text: "Criterion A regressed and needs repair." };
     },
-    readGoal, body => { open(body); return { tool: "write", args: { path: "a.txt", content: "verified-a" } }; },
+    readGoal, body => beginTask(body, 1),
+    () => write("a.txt", "verified-a"),
     () => read("a.txt"),
-    body => checkpoint(scope, "Repair A", [verified("A", "pass", body, "verified-a"), { id: "B", state: "reopen" }]),
+    body => checkpoint(scope, "Repair A", [verified("A", "pass", body, "verified-a"), unverified[1]], 1),
     okayCheckpoint,
-    readGoal, body => { open(body); return read("a.txt"); },
+    readGoal, body => beginTask(body, 2),
+    () => read("a.txt"),
     body => { a = verified("A", "pass", body, "verified-a"); return read("b.txt"); },
     body => { b = verified("B", "pass", body, "verified-b"); return checkpoint(scope, "Final acceptance", [a, b]); },
     body => { assert.equal(lastTool(body)?.name, "goalplus_checkpoint"); return { tool: "goalplus_complete", args: scope }; },
@@ -127,6 +224,10 @@ async function longGoal(installed) {
     assert.ok(scope.runId);
     assert.ok(!seenRuns.has(scope.runId), "continuations have distinct native dispatch identities");
     seenRuns.add(scope.runId);
+  }
+  function beginTask(body, number) {
+    open(body);
+    return alignTask(scope, number);
   }
   let ready = false;
   const server = await modelServer(body => {
@@ -179,11 +280,15 @@ async function compactAndRestore(installed, custom) {
       body => {
         scope = readScope(body);
         previousId = scope.goalId;
-        return read("a.txt");
+        return planTasks(scope);
       },
+      readGoal,
+      () => alignTask(scope, 1),
+      () => read("a.txt"),
       body => checkpoint(scope, "Verified before compressing", [
         verified("A", "pass", body, "verified-a"), { id: "B", state: "reopen" },
-      ]),
+      ], 1),
+      readGoal,
       () => {
         return { tool: "goalplus_block", args: {
           ...scope, reason: "Fixture awaits approval", dependency: "approval", evidence: "Waiting for fixture user action",
@@ -198,6 +303,7 @@ async function compactAndRestore(installed, custom) {
         assert.equal(scope.goalId, previousId);
         const restored = JSON.parse(lastTool(body).text);
         assert.equal(restored.objective, goal.objective);
+        assert.deepEqual(restored.plan, { tasks, completed: 1 });
         assert.ok(restored.evidence.some(item => item.criterionId === "A" && item.verdict === "pass"));
         return { tool: "goalplus_block", args: {
           ...scope, reason: "Fixture restored the original Goal", dependency: "user", evidence: "Acceptance was inspected",
@@ -249,7 +355,7 @@ async function compactAndRestore(installed, custom) {
     stage = "after";
     rpc = fixture.launch();
     await rpc.command("get_state");
-    await until(() => strip(rpc, [/Validate both/, /blocked/i]), "persisted Goal widget after restart");
+    await until(() => strip(rpc, [/Validate both/, /blocked/i, /Task 2\/2/]), "persisted Goal widget after restart");
     await rpc.command("prompt", { message: "/goal resume" });
     await until(() => {
       server.assertHealthy();
@@ -284,8 +390,9 @@ async function interruptedDispatch(installed) {
   try {
     const fixture = await rpcFixture(join(scratch, "interrupted"), installed.cli, installed.packages, server.baseUrl);
     rpc = fixture.launch();
-    await rpc.command("prompt", { message: "/goal start " + JSON.stringify(goal) });
+    await rpc.command("prompt", { message: "/goal " + goal.objective });
     await until(() => entered, "in-flight recorded Goal dispatch");
+    assert.ok(!rpc.events.some(event => event.method === "editor" || event.method === "confirm"));
     await rpc.close("SIGKILL");
     rpc = undefined;
     release();
@@ -339,6 +446,11 @@ async function parallelEvidence(installed) {
     readGoal,
     body => {
       scope = readScope(body);
+      return planTasks(scope);
+    },
+    readGoal,
+    () => alignTask(scope, 1),
+    () => {
       // The shell captures before-state, waits for the sibling to change it, then delivers a stale receipt.
       return { tools: [
         { tool: "bash", args: { command: "before=$(cat a.txt); touch sampled; for i in $(seq 1 100); do test -f changed && break; sleep 0.02; done; printf '%s' \"$before\"" } },
