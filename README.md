@@ -1,3 +1,82 @@
 # Pi GoalPlus
 
-Persistent, evidence-checked goals for the Pi coding agent.
+Give Pi an objective, constraints, and verifiable criteria. GoalPlus keeps the
+objective visible, continues after settled turns, and requires current
+evidence before finishing. It runs in the existing Pi session and workspace.
+
+## Install
+
+Use Node.js 22.19 or newer. The supported Pi lines are 1.6.x and 1.4.x.
+The native package checks use Pi 1.6.0 and 1.4.0. Install from the GitHub repository with Pi's native package manager:
+
+```sh
+pi install git:github.com/awangs1986/pi-goalplus
+```
+
+To try a checkout, run `npm ci` in it, then `pi -e ./src/index.ts`. Reload or
+restart Pi after installing. Use a single extension that owns the `/goal`
+command per session.
+
+## Use
+
+Type `/goal Keep the migration compatible with existing consumers`. Review the
+editable objective, constraints and criteria and confirm Start. Pi will use
+your current model and start the first turn. The Goal widget above the editor
+shows the objective, current stage, status and acceptance progress.
+
+| Command | Action |
+| --- | --- |
+| `/goal` or `/goal status` | Show the saved requirements and current progress. |
+| `/goal <objective>` | Draft and confirm a Goal in a dialog-capable session. |
+| `/goal start <JSON>` | Start an explicitly approved structured Goal from a client without a dialog. |
+| `/goal edit` or `/goal edit <JSON>` | Confirm or explicitly submit a new revision of the saved requirements. |
+| `/goal pause` | Let the current run settle and pause new Goal turns. |
+| `/goal stop` | Pause the Goal and cancel its current run through Pi. |
+| `/goal resume` | Continue the saved Goal when eligible. |
+| `/goal clear` | Clear the Goal while keeping native conversation history and workspace files. |
+
+An approved JSON definition has an `objective`, `constraints`, and a nonempty
+`criteria` array. Give each criterion its own ID and verification method. An
+optional positive integer `budgetTokens` applies to the Goal's cumulative
+usage.
+
+```text
+/goal start {"objective":"Fix the build","constraints":["Keep the public API stable"],"criteria":[{"id":"build","requirement":"The project builds","verification":"Run npm run build"}]}
+```
+
+For automation use Pi's interactive or RPC session so it can keep processing
+successive runs. RPC clients receive the standard `setWidget` and `notify`
+extension UI frames. Record which native Pi session to reopen if you stop the
+process. A Goal can continue when Pi can confirm the previous work settled.
+An uncertain in-flight run needs review before you explicitly resume it.
+Use one live Pi process per session. Third-party asynchronous work that returns
+control to Pi before it finishes needs its own completion signal or a paused
+Goal.
+
+## Evidence and compaction
+
+Goal turns read the confirmed requirements before using tools. A stage
+checkpoint accounts for every criterion and records native tool receipts that
+support the verdicts. A completion proposal is tied to the current confirmed
+revision and run. Later changes can invalidate evidence, and Pi must settle
+successfully before completion is final.
+
+Native Pi owns compaction. GoalPlus keeps the Goal in separate native session
+entries, so the next turn retrieves the same confirmed requirements even if
+prior model context was condensed. Tool results remain in Pi's native history.
+Arbitrary shell and other potentially mutating tools make previous workspace
+evidence stale. For several shell verifications, run them together and capture
+each outcome in one result, then add read-only checks as needed. Final
+acceptance uses current-run receipts. The extension validates receipt identity
+and criterion coverage. The model judges whether the evidence is relevant and
+sufficient.
+
+## Develop
+
+```sh
+npm ci
+npm run check
+```
+
+The native tests install a packed copy with an official Pi release and use an
+isolated session and scripted local provider. See the [specification](docs/spec.md).
