@@ -18,6 +18,7 @@ const events = {
   dispatchMissing: "Pi did not acknowledge the Goal dispatch",
   dispatchUncertain: "Previous Goal dispatch did not settle",
   modelMissing: "Pi model unavailable",
+  toolsUnavailable: "Pi Goal tools unavailable",
   modeUnsupported: "Pi session mode cannot run Goals",
   budgetExhausted: "Goal token budget exhausted",
   stalled: "Goal stopped after repeated runs without progress",

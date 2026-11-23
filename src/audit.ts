@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-
 import { Type } from "typebox";
 import { recordGoalLog } from "./logs.js";
 import { decodeTaskPlan, MAX_TASKS, MAX_TASK_TITLE_LENGTH, MIN_TASKS } from "./store.js";
-import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
+import { GOAL_CHECKPOINT_TOOL, isGoalTool, isNativeReadOnly } from "./tool-policy.js";
 import type { ConstraintReview, Evidence, Goal, GoalRunner, GoalStore } from "./types.js";
 
 const MAX_RECEIPTS = 64;
@@ -308,7 +308,7 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
     }
   });
   pi.registerTool({
-    name: "goalplus_checkpoint",
+    name: GOAL_CHECKPOINT_TOOL,
     label: "Audit Goal Stage",
     description: "Audit a stage against the confirmed Goal or recheck it before continuing. Include each criterion and constraint once. Set taskCompleted only after finishing and verifying the current task. Call this on its own at a task boundary. Set nextStageTokens when you can estimate the upcoming work's additional context, including tool output and verification. Finish the last task with goalplus_complete after its final audit. Pass/fail needs a current native source receipt with output and a short observed result. Shell or unknown tools invalidate previous receipts. Group shell checks in one invocation when needed. Retain only evidence unaffected by later work. Keep evidence descriptions short and omit secrets. Reopen any item whose proof is affected, missing, or uncertain. A passed constraint requires a current successful source receipt. Mark an uncertain constraint unknown and explain what needs rechecking.",
     parameters: Type.Object({

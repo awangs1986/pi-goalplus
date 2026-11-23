@@ -72,6 +72,12 @@ Diagnostics follow the selected Pi session branch through compaction and
 reopen. The report uses fixed labels and bounded metadata. It stays outside
 the model's working context.
 
+Goal stage audits use `goalplus_checkpoint`. During a Goal, Pi can route the
+older `checkpoint` spelling to the same audit when the short name is unclaimed.
+In Coffee, switch to `/work` before starting or resuming a Goal. If Pi tool
+filters exclude a required Goal tool, `/goal status` names the missing tool.
+Adjust the filters and run `/goal resume` to continue.
+
 ## Evidence and compaction
 
 Goal turns read the confirmed requirements before using tools. A checkpoint

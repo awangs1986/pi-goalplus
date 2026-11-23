@@ -68,6 +68,12 @@ affected items, and reopen those with failed or unclear evidence. Record a
 short stage, evidence references and current verdicts. The final task finishes
 with Goal completion after the final audit and successful settlement.
 
+Advertise `goalplus_checkpoint` for stage audits. An active Goal can translate
+the older `checkpoint` spelling when the short name is unclaimed and the
+canonical tool is active. Apply the same revision, run, and evidence checks.
+If required tools are unavailable, record the reason before provider work.
+Coffee users can switch to Work and resume the same Goal.
+
 A completion proposal must refer to the active Goal, its confirmed revision
 and the current run. It must include current acceptance coverage and passing
 evidence for every required item, with all constraints checked. Reject missing
@@ -122,6 +128,7 @@ tool output, credentials and raw provider errors outside the diagnostic log.
 | Proactive compaction | A stage forecast that reaches the remaining capacity triggers native compaction above 70%. At 70% or with enough space, the next stage proceeds directly. |
 | Recovery | On pause, stop, resume and reopen, Goal state follows the active session branch. Uncertain work is not silently repeated. |
 | Resume after interruption | A standalone `继续` resumes the saved goal at its unfinished task. The objective, revision and verified progress remain available. |
+| Checkpoint availability | A resumed Goal can audit an older checkpoint call. When Coffee Chat or a Pi tool filter removes a required tool, Goal status explains how to resume. |
 | Diagnostics | After a failed Goal run and session reopen, `/goal logs` shows the affected task and available HTTP status using bounded metadata. |
 | Limits | Provider limits and explicitly configured token budgets display the cause. Goal completion is independent of both. |
 

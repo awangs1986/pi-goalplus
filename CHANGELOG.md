@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Route a legacy `checkpoint` call to `goalplus_checkpoint` during an active
+  Goal when the short name is unclaimed.
+- Report missing Goal controls and the Coffee Work requirement before sending
+  a Goal turn to the provider.
+
 ## 0.4.0
 
 - Add `/goal logs [count]` for recent Goal diagnostics in the native Pi session.

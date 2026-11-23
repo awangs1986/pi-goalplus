@@ -23,6 +23,7 @@ const unverified = goal.criteria.map(({ id }) => ({ id, state: "reopen" }));
 try {
   const installed = await install();
   await resumeAfterFailure(installed);
+  await unavailableGoalTools(installed);
   await compactBeforeNextTask(installed);
   await compactBeforeNextTask(installed, { key: "at-70-percent", usage: 44_797, estimate: 30_000, expected: false });
   await compactBeforeNextTask(installed, { key: "enough-space", usage: 47_000, estimate: 2_000, expected: false });
@@ -131,8 +132,13 @@ async function resumeAfterFailure(installed) {
     () => write("b.txt", "verified-b"),
     () => read("a.txt"),
     body => { a = verified("A", "pass", body, "verified-a"); return read("b.txt"); },
-    body => checkpoint(scope, "Verified both fixtures", [a, verified("B", "pass", body, "verified-b")]),
-    () => ({ tool: "goalplus_complete", args: scope }),
+    body => ({ ...checkpoint(scope, "Verified both fixtures", [a, verified("B", "pass", body, "verified-b")]), tool: "checkpoint" }),
+    body => {
+      const result = lastTool(body);
+      assert.equal(result?.name, "goalplus_checkpoint", result?.text);
+      assert.match(result.text, /"status":"audited"/);
+      return { tool: "goalplus_complete", args: scope };
+    },
     () => ({ text: "Both tasks verified." }),
   ];
   const server = await modelServer(body => {
@@ -189,8 +195,38 @@ async function resumeAfterFailure(installed) {
     assert.equal(await readFile(join(fixture.cwd, "b.txt"), "utf8"), "verified-b");
     console.log('PASS native Goal resumes the same objective, revision and next task after a provider interruption and "继续"');
     console.log("PASS /goal logs shows the saved failed task and HTTP status without provider response text");
+    console.log("PASS a resumed Goal audits a legacy checkpoint call through the canonical tool");
   } finally {
     if (rpc) await rpc.close();
+    await server.close();
+  }
+}
+
+async function unavailableGoalTools(installed) {
+  const chat = join(scratch, "coffee-chat-mode.mjs");
+  await writeFile(chat, 'export default pi => pi.events.on("pi-coffee:harness-mode:query:v1", request => { request.mode = "chat"; });\n');
+  const scenarios = [
+    { key: "coffee-chat", extensions: [chat], flags: [], reason: /Switch to \/work/ },
+    { key: "excluded-checkpoint", extensions: [], flags: ["--exclude-tools", "goalplus_checkpoint"], reason: /goalplus_checkpoint/ },
+  ];
+  const server = await modelServer(() => assert.fail("A Goal with unavailable controls must not call the provider"));
+  try {
+    for (const { key, extensions, flags, reason } of scenarios) {
+      const fixture = await rpcFixture(join(scratch, key), installed.cli, installed.packages, server.baseUrl, extensions, flags);
+      const rpc = fixture.launch();
+      try {
+        await rpc.command("prompt", { message: "/goal Check native tool availability" });
+        await until(() => {
+          server.assertHealthy();
+          return strip(rpc, [/\[Blocked\]/, reason]);
+        }, "Goal paused at its unavailable tool boundary");
+        assert.equal(rpc.events.some(event => event.type === "agent_start"), false);
+      } finally {
+        await rpc.close();
+      }
+    }
+    console.log("PASS unavailable checkpoint and Coffee Chat report how to resume before dispatch");
+  } finally {
     await server.close();
   }
 }

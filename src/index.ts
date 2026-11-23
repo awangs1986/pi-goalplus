@@ -3,9 +3,10 @@ import { registerGoalTools } from "./audit.js";
 import { registerGoalCommands, renderGoal } from "./commands.js";
 import { registerGoalRunner } from "./runner.js";
 import { createGoalStore } from "./store.js";
-import { GOAL_TOOL_NAMES, isGoalTool } from "./tool-policy.js";
+import { GOAL_CHECKPOINT_TOOL, GOAL_TOOL_NAMES, isGoalTool } from "./tool-policy.js";
 
 const SECTION = "pi-goalplus";
+const LEGACY_CHECKPOINT = "checkpoint";
 const RULES = [
   "This is a turn for one explicitly confirmed persistent Goal.",
   "A GoalPlus dispatch starts or resumes the saved work. Use the original objective, requirements and unfinished task returned by goalplus_read as the scope of work.",
@@ -33,6 +34,18 @@ export default function goalPlus(pi: ExtensionAPI): void {
     } else {
       delete options.sections[SECTION];
     }
+  });
+
+  pi.on("message_end", (event, ctx) => {
+    const { message } = event;
+    if (message.role !== "assistant" || message.stopReason !== "toolUse" ||
+        !message.content.some(part => part.type === "toolCall" && part.name === LEGACY_CHECKPOINT)) return;
+    if (store.read(ctx)?.status !== "active" || !runner.current(ctx) ||
+        !pi.getActiveTools().includes(GOAL_CHECKPOINT_TOOL) ||
+        pi.getAllTools().some(tool => tool.name === LEGACY_CHECKPOINT)) return;
+    return { message: { ...message, content: message.content.map(part =>
+      part.type === "toolCall" && part.name === LEGACY_CHECKPOINT ? { ...part, name: GOAL_CHECKPOINT_TOOL } : part,
+    ) } };
   });
 
   pi.on("context", (event, ctx) => {

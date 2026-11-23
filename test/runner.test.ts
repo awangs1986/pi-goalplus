@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerGoalRunner } from "../src/runner.js";
+import { GOAL_TOOL_NAMES } from "../src/tool-policy.js";
 import type { Goal, GoalStore } from "../src/types.js";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -14,6 +15,7 @@ function fixture(goalChanges: Partial<Goal> = {}, blankPersistentSession = false
   const branch: SessionEntry[] = [];
   const compactions: NonNullable<Parameters<ExtensionContext["compact"]>[0]>[] = [];
   const sources = new Map(["edit", "write", "read", "bash", "grep", "find", "ls", "powershell"].map(name => [name, "builtin"]));
+  for (const name of GOAL_TOOL_NAMES) sources.set(name, "extension");
   let idle = true;
   let queued = false;
   let aborted = false;

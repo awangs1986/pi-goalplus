@@ -79,7 +79,7 @@ export function lastTool(body) {
   return { id: message.tool_call_id, name: call?.function?.name, text: message.content };
 }
 
-export async function rpcFixture(directory, cli, packages, baseUrl, extensions = []) {
+export async function rpcFixture(directory, cli, packages, baseUrl, extensions = [], cliArgs = []) {
   const agent = join(directory, "agent");
   const cwd = join(directory, "work");
   const session = join(directory, "session.jsonl");
@@ -101,6 +101,7 @@ export async function rpcFixture(directory, cli, packages, baseUrl, extensions =
       cli, "--mode", "rpc", "--offline", "--no-skills",
       "--provider", "fixture", "--model", "fixture", "--session", session,
       ...extensions.flatMap(extension => ["-e", extension]),
+      ...cliArgs,
     ], {
       cwd, env: {
         PATH: process.env.PATH,

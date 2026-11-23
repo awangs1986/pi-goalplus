@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { AgentActivityOutcome, ExtensionAPI, ExtensionContext, SessionEntry, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { diagnosticToolName, recordGoalLog } from "./logs.js";
-import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
+import { isGoalTool, isNativeReadOnly, unavailableGoalToolReason } from "./tool-policy.js";
 import type { Dispatch, Goal, GoalRunner, GoalStore } from "./types.js";
 
 const TRIGGER = "pi-goalplus-run";
@@ -316,6 +316,13 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     startWatch.unref();
   }
 
+  function blockForUnavailableTools(ctx: ExtensionContext, goal: Goal, reason: string): void {
+    const blocked = { ...goal, status: "blocked", reason } as const;
+    store.write(ctx, blocked);
+    recordGoalLog(pi, ctx, blocked, "toolsUnavailable");
+    ctx.ui.notify(reason, "warning");
+  }
+
   function request(ctx: ExtensionContext, forecast?: number): void {
     if (run || compaction || !ctx.isIdle() || ctx.hasPendingMessages()) return;
     const goal = store.read(ctx);
@@ -325,6 +332,11 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       const blocked = { ...goal, status: "blocked", reason: "Resume in Pi's terminal UI or a persistent RPC session." } as const;
       store.write(ctx, blocked);
       recordGoalLog(pi, ctx, blocked, "modeUnsupported");
+      return;
+    }
+    const unavailable = unavailableGoalToolReason(pi, pi.getAllTools().map(tool => tool.name));
+    if (unavailable) {
+      blockForUnavailableTools(ctx, goal, unavailable);
       return;
     }
     if (reachedBudget(goal)) {
@@ -455,6 +467,17 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
 
   pi.on("agent_start", () => {
     if (run?.started) clearStartWatch();
+  });
+
+  pi.on("before_provider_request", (_event, ctx) => {
+    if (!run?.started) return;
+    const unavailable = unavailableGoalToolReason(pi, pi.getActiveTools());
+    if (!unavailable) return;
+    const goal = store.read(ctx);
+    if (matches(ctx, goal, run) && goal.status === "active") {
+      blockForUnavailableTools(ctx, goal, unavailable);
+      ctx.abort();
+    }
   });
 
   function enforceBudget(ctx: ExtensionContext, pending = 0): void {
