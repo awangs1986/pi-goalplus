@@ -174,6 +174,8 @@ test("an invalid direct objective fails before saving a Goal or starting a turn"
     await rpc.wait(frame => frame.type === "extension_error" && frame.error?.includes("objective") === true);
     expect((await rpc.command("prompt", { message: "/goal status" })).success).toBe(true);
     await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("No Goal") === true);
+    await rpc.command("prompt", { message: "/goal logs" });
+    await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("Goal definition rejected") === true);
     expect(rpc.frames.some(frame => frame.type === "agent_start")).toBe(false);
   });
 }, 8000);
@@ -262,6 +264,8 @@ test("a malformed latest snapshot fails closed and can be cleared explicitly", a
     expect((await rpc.command("prompt", { message: "/fixture-invalid" })).success).toBe(true);
     expect((await rpc.command("prompt", { message: "/goal status" })).success).toBe(true);
     await rpc.wait(frame => frame.type === "extension_error" && frame.error?.includes("incompatible or damaged") === true);
+    await rpc.command("prompt", { message: "/goal logs" });
+    await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("Goal logs · Goal state unavailable") === true);
     expect((await rpc.command("prompt", { message: "/goal clear" })).success).toBe(true);
     expect((await rpc.command("prompt", { message: "/goal status" })).success).toBe(true);
     await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("No Goal") === true);
@@ -299,6 +303,8 @@ test("an authenticated Goal restarts from the original file but its copy still n
     const original = (await rpc.command("get_state")).data?.sessionFile;
     expect(original).toMatch(/\.jsonl$/);
     if (!original) throw Error("Pi did not persist the fixture session.");
+    await rpc.command("prompt", { message: "/goal logs" });
+    await rpc.wait(frame => frame.method === "notify" && frame.message?.includes("Goal stopped by user") === true);
     const copy = join(dirname(original), "imported-copy.jsonl");
     await copyFile(original, copy);
 
@@ -307,6 +313,9 @@ test("an authenticated Goal restarts from the original file but its copy still n
     await rpc.command("switch_session", { sessionPath: copy });
     await rpc.wait(frame => !copyEvents.has(frame) && frame.method === "setWidget" &&
       frame.widgetLines?.some(line => line.includes("no verified local origin")) === true);
+    await rpc.command("prompt", { message: "/goal logs" });
+    await rpc.wait(frame => !copyEvents.has(frame) && frame.method === "notify" &&
+      frame.message?.includes("No diagnostic events") === true);
     expect(rpc.frames.filter(frame => !copyEvents.has(frame) && frame.type === "agent_start")).toHaveLength(0);
 
     const originalEvents = new Set(rpc.frames);

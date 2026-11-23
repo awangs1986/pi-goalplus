@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { AgentActivityOutcome, ExtensionAPI, ExtensionContext, SessionEntry, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import { diagnosticToolName, recordGoalLog } from "./logs.js";
 import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
 import type { Dispatch, Goal, GoalRunner, GoalStore } from "./types.js";
 
@@ -10,6 +11,7 @@ const NO_PROGRESS_LIMIT = 3;
 const SAFE_RETRY_DELAYS = [250, 1000];
 const RECENT_PROGRESS_LIMIT = 128;
 const RECENT_ACTIVITY_LIMIT = 128;
+const TOOL_FAILURE_LOG_LIMIT = 8;
 const START_ACK_TIMEOUT = 30_000;
 const EARLY_COMPACTION_PERCENT = 70;
 const BUDGET_USED = "The Goal token budget has been used. Raise or remove the budget to continue.";
@@ -23,6 +25,7 @@ interface NativeRun {
   id: string;
   startProgress: string;
   activity: Set<string>;
+  loggedToolFailures: Set<string>;
   initialPrompt?: string;
   started: boolean;
   outcome?: AgentActivityOutcome;
@@ -178,6 +181,13 @@ function failedRequest(run: NativeRun): "usage" | "transient" | "error" {
   return "error";
 }
 
+function diagnosticHttpStatus(run: NativeRun): number | undefined {
+  const status = run.statusCode;
+  if (status !== undefined && status >= 400 && status <= 599) return status;
+  const match = /^(?:HTTP\s+)?([45]\d{2})(?=[:\s]|$)/i.exec(run.providerError ?? "");
+  return match ? Number(match[1]) : undefined;
+}
+
 export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunner {
   let run: NativeRun | undefined;
   let next: ReturnType<typeof setTimeout> | undefined;
@@ -237,8 +247,9 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     };
     compaction = attempt;
     attemptedStage = stageKey(goal);
-    const percent = (usage.tokens / usage.contextWindow * 100).toFixed(1);
-    ctx.ui.notify(`GoalPlus is compacting context at ${percent}% before the next stage.`, "info");
+    const percent = usage.tokens / usage.contextWindow * 100;
+    recordGoalLog(pi, ctx, goal, "compactStarted", { source: "early", contextPercent: percent });
+    ctx.ui.notify(`GoalPlus is compacting context at ${percent.toFixed(1)}% before the next stage.`, "info");
 
     const finish = (reportedTokens: number, failed = false) => {
       if (compaction !== attempt) return;
@@ -259,6 +270,8 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
           }
         }
         if (updated.tokensUsed !== current.tokensUsed || updated.status !== current.status) store.write(ctx, updated);
+        const outcome = attempt.cancelled ? "compactCancelled" : failed ? "compactFailed" : "compacted";
+        recordGoalLog(pi, ctx, updated, outcome, { source: "early" });
         if (updated.status === "active") schedule(ctx, updated);
       });
     };
@@ -280,14 +293,16 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     const goal = store.read(ctx);
     run = undefined;
     if (!matches(ctx, goal, candidate)) return;
-    store.write(ctx, {
+    const blocked: Goal = {
       ...goal, dispatch: undefined,
       tokensUsed: addTokens(goal.tokensUsed, tokensSinceDispatch(ctx, goal.dispatch)),
       status: goal.status === "active" ? "blocked" : goal.status,
       reason: goal.status === "active"
         ? "Pi did not confirm that this Goal dispatch started. Inspect the session before resuming."
         : goal.reason,
-    });
+    };
+    store.write(ctx, blocked);
+    recordGoalLog(pi, ctx, blocked, "dispatchMissing", { runId: candidate.id });
   }
 
   function watchStart(ctx: ExtensionContext, candidate: NativeRun): void {
@@ -307,17 +322,21 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     if (goal?.status !== "active" || goal.dispatch) return;
     cancelNext();
     if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
-      store.write(ctx, { ...goal, status: "blocked", reason: "Resume in Pi's terminal UI or a persistent RPC session." });
+      const blocked = { ...goal, status: "blocked", reason: "Resume in Pi's terminal UI or a persistent RPC session." } as const;
+      store.write(ctx, blocked);
+      recordGoalLog(pi, ctx, blocked, "modeUnsupported");
       return;
     }
     if (reachedBudget(goal)) {
-      store.write(ctx, {
-        ...goal, status: "budgetLimited", reason: BUDGET_USED,
-      });
+      const limited = { ...goal, status: "budgetLimited", reason: BUDGET_USED } as const;
+      store.write(ctx, limited);
+      recordGoalLog(pi, ctx, limited, "budgetExhausted");
       return;
     }
     if (!ctx.model) {
-      store.write(ctx, { ...goal, status: "blocked", reason: "Select a Pi model before resuming this Goal." });
+      const blocked = { ...goal, status: "blocked", reason: "Select a Pi model before resuming this Goal." } as const;
+      store.write(ctx, blocked);
+      recordGoalLog(pi, ctx, blocked, "modelMissing");
       return;
     }
     if (forecast !== undefined && compactBeforeStage(ctx, goal, forecast)) return;
@@ -340,7 +359,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     });
     const candidate: NativeRun = {
       sessionId, goalId: goal.id, revision: goal.revision, id,
-      startProgress: progressKey(goal), activity: new Set(), initialPrompt, started: false,
+      startProgress: progressKey(goal), activity: new Set(), loggedToolFailures: new Set(), initialPrompt, started: false,
     };
     run = candidate;
     watchStart(ctx, candidate);
@@ -429,7 +448,9 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       return;
     }
     run.stageStart = contextSample(ctx);
-    store.write(ctx, { ...goal, dispatch: { ...goal.dispatch, phase: "running" } });
+    const started = { ...goal, dispatch: { ...goal.dispatch, phase: "running" } } as const;
+    store.write(ctx, started);
+    recordGoalLog(pi, ctx, started, "started");
   });
 
   pi.on("agent_start", () => {
@@ -468,6 +489,15 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     if (run?.started && !isGoalTool(event.toolName) &&
       !isNativeReadOnly(pi, event.toolName)) run.possibleEffects = true;
   });
+  pi.on("tool_execution_end", (event, ctx) => {
+    if (!run?.started || !event.isError || event.parentToolCallId || run.loggedToolFailures.size >= TOOL_FAILURE_LOG_LIMIT) return;
+    const tool = diagnosticToolName(event.toolName);
+    if (run.loggedToolFailures.has(tool)) return;
+    const goal = store.read(ctx);
+    if (!matches(ctx, goal, run)) return;
+    run.loggedToolFailures.add(tool);
+    recordGoalLog(pi, ctx, goal, "toolFailed", { tool });
+  });
   pi.on("tool_result", (event, ctx) => {
     if (!run?.started || run.sessionId !== ctx.sessionManager.getSessionId()) return;
     const key = outcomeKey(event, ctx.cwd, isBuiltin(pi, event.toolName));
@@ -484,7 +514,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     if (run?.started && !run.stageStart) run.stageStart = contextSample(ctx);
   });
 
-  pi.on("session_compact", (_event, ctx) => {
+  pi.on("session_compact", (event, ctx) => {
     enforceBudget(ctx);
     const goal = store.read(ctx);
     if (run && matches(ctx, goal, run)) {
@@ -492,12 +522,16 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       run.stageForecast = undefined;
       run.yieldForCompaction = false;
     }
+    if (!compaction && goal?.status === "active") recordGoalLog(pi, ctx, goal, "compacted", { source: event.reason });
     if (!run && !compaction && goal?.status === "active" && !goal.dispatch) schedule(ctx, goal);
   });
   pi.on("session_compact_failed", (event, ctx) => {
     const goal = store.read(ctx);
     if (compaction && event.reason === "manual" && matchesCompaction(ctx, goal, compaction)) {
       compaction.cancelled = event.aborted;
+    }
+    if (!compaction && goal?.status === "active") {
+      recordGoalLog(pi, ctx, goal, event.aborted ? "compactCancelled" : "compactFailed", { source: event.reason });
     }
     if (!run && !compaction && goal?.status === "active" && !goal.dispatch) schedule(ctx, goal);
   });
@@ -525,6 +559,17 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       }
       const delay = decideNext(goal, nextGoal, settled, event.aborted);
       store.write(ctx, nextGoal);
+      if (nextGoal.status === "budgetLimited") {
+        recordGoalLog(pi, ctx, nextGoal, "budgetExhausted", { runId: settled.id });
+      } else if (event.aborted || settled.outcome === "aborted") {
+        recordGoalLog(pi, ctx, nextGoal, "interrupted", { runId: settled.id });
+      } else if (settled.outcome !== "completed") {
+        const failure = failedRequest(settled);
+        const error = failure === "usage" ? "providerLimited" : failure === "transient" ? "providerTransient" : "providerFailed";
+        recordGoalLog(pi, ctx, nextGoal, error, { runId: settled.id, httpStatus: diagnosticHttpStatus(settled), retryMs: delay });
+      } else {
+        recordGoalLog(pi, ctx, nextGoal, nextGoal.noProgress >= NO_PROGRESS_LIMIT ? "stalled" : "settled", { runId: settled.id });
+      }
       if (nextGoal.status === "active") {
         const forecast = settled.outcome === "completed"
           ? settled.stageForecast ?? stageTokenForecast(ctx, contextSample(ctx), settled.stageStart)
@@ -558,7 +603,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
       return;
     }
     if (goal.dispatch) {
-      store.write(ctx, {
+      const recovered: Goal = {
         ...goal, ownerSessionId, dispatch: undefined,
         tokensUsed: addTokens(goal.tokensUsed, tokensSinceDispatch(ctx, goal.dispatch)),
         status: goal.status === "active" ? "blocked" : goal.status,
@@ -566,7 +611,9 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
           ? "Pi could not confirm the prior Goal run settled. Inspect its results before resuming."
           : goal.reason,
         auditedRunId: undefined, completionRunId: undefined,
-      });
+      };
+      store.write(ctx, recovered);
+      recordGoalLog(pi, ctx, recovered, "dispatchUncertain", { runId: goal.dispatch.id });
       return;
     }
     if (goal.status === "active") schedule(ctx, goal);

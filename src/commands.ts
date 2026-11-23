@@ -1,19 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_GOAL_LOG_LIMIT, MAX_GOAL_LOG_LIMIT, readGoalLogs, recordGoalLog } from "./logs.js";
 import { GoalStateError, MAX_CRITERION_TEXT_LENGTH, parseGoalDefinition } from "./store.js";
-import type { Goal, GoalDefinition, GoalRunner, GoalStore } from "./types.js";
+import { GOAL_STATUS_LABELS as labels, type Goal, type GoalDefinition, type GoalRunner, type GoalStore } from "./types.js";
 
 const widgetKey = "pi-goalplus";
-const usage = "/goal <objective> or /goal start <JSON>; /goal status, edit, pause, stop, resume, clear.";
+const usage = "/goal <objective> or /goal start <JSON>; /goal status, logs, edit, pause, stop, resume, clear.";
 const resumeInput = /^(?:resume|continue|继续)[.!?。！？]*$/i;
-const labels = {
-  active: "Active",
-  paused: "Paused",
-  blocked: "Blocked",
-  usageLimited: "Usage limited",
-  budgetLimited: "Budget exhausted",
-  complete: "Complete"
-} as const;
 
 function plainLine(value: string): string {
   return value.replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
@@ -162,6 +155,25 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
     return goal;
   };
 
+  function showLogs(ctx: ExtensionContext, count: string): void {
+    const limit = count ? Number(count) : DEFAULT_GOAL_LOG_LIMIT;
+    if (count && (!/^\d{1,2}$/.test(count) || limit < 1 || limit > MAX_GOAL_LOG_LIMIT)) {
+      notify(ctx, `Use /goal logs [1–${MAX_GOAL_LOG_LIMIT}].`);
+      return;
+    }
+    let goal: Goal | undefined;
+    let heading = "Goal logs";
+    try {
+      goal = store.read(ctx);
+      if (goal) heading += ` · ${labels[goal.status]} · revision ${goal.revision}`;
+    } catch (error) {
+      if (!(error instanceof GoalStateError)) throw error;
+      heading += " · Goal state unavailable";
+    }
+    const entries = readGoalLogs(ctx, goal?.id, limit);
+    notify(ctx, [heading, ...(entries.length ? entries : ["No diagnostic events recorded here yet."])].join("\n"));
+  }
+
   async function reviewDefinition(
     ctx: ExtensionContext,
     draft: GoalDefinition,
@@ -216,14 +228,18 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
     }
     requireIdle(ctx);
     if (goal.dispatch) throw Error("The previous Goal dispatch has not settled.");
+    let resumed: Goal;
     if (goal.needsReview) {
       const { objective, constraints, criteria, budgetTokens } = goal;
       const reviewed = await reviewDefinition(ctx, { objective, constraints, criteria, budgetTokens }, false);
       if (!reviewed) return;
-      store.write(ctx, initialGoal(reviewed), "user-confirmed");
+      resumed = initialGoal(reviewed);
+      store.write(ctx, resumed, "user-confirmed");
     } else {
-      store.write(ctx, { ...goal, status: "active", reason: undefined, noProgress: 0, consecutiveFailures: 0 });
+      resumed = { ...goal, status: "active", reason: undefined, noProgress: 0, consecutiveFailures: 0 };
+      store.write(ctx, resumed);
     }
+    recordGoalLog(pi, ctx, resumed, "resumed");
     runner.request(ctx);
   }
 
@@ -235,6 +251,7 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
       if (!goal || goal.status === "complete") return;
       await resumeGoal(ctx, goal);
     } catch (error) {
+      if (error instanceof GoalStateError) recordGoalLog(pi, ctx, undefined, "stateUnavailable");
       notify(ctx, error instanceof Error ? error.message : "GoalPlus could not resume the saved Goal.");
     }
     return { action: "handled" };
@@ -244,6 +261,10 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
     description: "Create, inspect and control a persistent Goal",
     handler: async (input, ctx) => {
       const args = input.trim();
+      if (args === "logs" || /^logs\s/.test(args)) {
+        showLogs(ctx, args.slice(4).trim());
+        return;
+      }
       if (!args || args === "status") {
         const goal = store.read(ctx);
         notify(ctx, goal ? details(goal) : `No Goal is set for this Pi session. ${usage}`);
@@ -259,11 +280,13 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
         const goal = getGoal(ctx);
         const ownWork = runner.current(ctx) || runner.compacting(ctx);
         if (goal.status === "active") {
-          store.write(ctx, {
+          const paused: Goal = {
             ...goal, status: "paused",
             reason: args === "stop" ? "Stopped by the user." : "Paused by the user.",
             completionRunId: undefined
-          });
+          };
+          store.write(ctx, paused);
+          recordGoalLog(pi, ctx, paused, args === "stop" ? "stopped" : "paused");
         } else if (!(args === "stop" && goal.status === "paused" && ownWork)) {
           throw Error("Only an active Goal can be paused or stopped.");
         }
@@ -291,6 +314,7 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
         if (!definition) return;
         const next = revisedGoal(goal, definition);
         store.write(ctx, next, "user-confirmed");
+        recordGoalLog(pi, ctx, next, "goalEdited");
         if (next.status === "active") runner.request(ctx);
         return;
       }
@@ -301,16 +325,22 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
       }
       const explicitStart = args === "start" || /^start\s/.test(args);
       if (args === "start") throw Error("Use /goal start <JSON> with a reviewed definition, or /goal <objective> to start directly.");
-      const definition = explicitStart
-        ? parseGoalDefinition(args.slice(5).trim())
-        : parseGoalDefinition(JSON.stringify({
-          objective: args, constraints: [],
-          criteria: [{
-            id: "c1",
-            requirement: args.length <= MAX_CRITERION_TEXT_LENGTH ? args : "The confirmed objective is achieved.",
-            verification: "Inspect the result and collect concrete evidence that the objective is met."
-          }]
-        }));
+      let definition: GoalDefinition;
+      try {
+        definition = explicitStart
+          ? parseGoalDefinition(args.slice(5).trim())
+          : parseGoalDefinition(JSON.stringify({
+            objective: args, constraints: [],
+            criteria: [{
+              id: "c1",
+              requirement: args.length <= MAX_CRITERION_TEXT_LENGTH ? args : "The confirmed objective is achieved.",
+              verification: "Inspect the result and collect concrete evidence that the objective is met."
+            }]
+          }));
+      } catch (error) {
+        recordGoalLog(pi, ctx, existing, "definitionRejected");
+        throw error;
+      }
       store.write(ctx, initialGoal(definition), "user-confirmed");
       runner.request(ctx);
     }

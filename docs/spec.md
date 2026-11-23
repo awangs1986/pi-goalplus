@@ -97,6 +97,19 @@ recovery. Optional Handoff keeps its explicit invocation. Older Goal reads
 appear as references in model requests. Their original results stay in native
 Pi history.
 
+## Goal diagnostics
+
+Use `/goal logs [count]` to read recent diagnostic events in the current Pi
+session and selected history branch. The command reads local state during
+active or interrupted work. It can show the latest events when the Goal
+snapshot is damaged. It returns 20 entries by default and accepts 1–50.
+
+Record lifecycle transitions, task checkpoints, failure categories, provider
+HTTP status when available, and compaction attempts and outcomes. Use known
+labels for tools and report repeated tool failures once per run. Store only
+diagnostic metadata in native custom session entries. Keep prompts, arguments,
+tool output, credentials and raw provider errors outside the diagnostic log.
+
 ## Acceptance
 
 | Scenario | Expected behavior |
@@ -109,6 +122,7 @@ Pi history.
 | Proactive compaction | A stage forecast that reaches the remaining capacity triggers native compaction above 70%. At 70% or with enough space, the next stage proceeds directly. |
 | Recovery | On pause, stop, resume and reopen, Goal state follows the active session branch. Uncertain work is not silently repeated. |
 | Resume after interruption | A standalone `继续` resumes the saved goal at its unfinished task. The objective, revision and verified progress remain available. |
+| Diagnostics | After a failed Goal run and session reopen, `/goal logs` shows the affected task and available HTTP status using bounded metadata. |
 | Limits | Provider limits and explicitly configured token budgets display the cause. Goal completion is independent of both. |
 
 Use the published Pi extension and RPC seams for deterministic tests. Live model

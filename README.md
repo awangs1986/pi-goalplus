@@ -33,6 +33,7 @@ progress survive compaction and session reopen.
 | Command | Action |
 | --- | --- |
 | `/goal` or `/goal status` | Show the saved requirements and current progress. |
+| `/goal logs [count]` | Show recent diagnostics for the current Goal, newest first. |
 | `/goal <objective>` | Start a Goal immediately with the given objective. |
 | `/goal start <JSON>` | Start an explicitly approved structured Goal from a client without a dialog. |
 | `/goal edit` or `/goal edit <JSON>` | Confirm or explicitly submit a new revision of the saved requirements. |
@@ -61,6 +62,15 @@ Goal, standalone continuation text follows the normal Pi input path.
 Use one live Pi process per session. Third-party asynchronous work that returns
 control to Pi before it finishes needs its own completion signal or a paused
 Goal.
+
+## Debug a Goal
+
+Run `/goal logs` to see the latest 20 diagnostic events. Pass a count from 1
+to 50, such as `/goal logs 5`, to control the output. Each event can identify
+the time, revision, current task, run, failure category and HTTP status.
+Diagnostics follow the selected Pi session branch through compaction and
+reopen. The report uses fixed labels and bounded metadata. It stays outside
+the model's working context.
 
 ## Evidence and compaction
 

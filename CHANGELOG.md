@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Add `/goal logs [count]` for recent Goal diagnostics in the native Pi session.
+- Record run failures, task transitions, tool failures, compaction and recovery
+  with bounded diagnostic metadata.
+
 ## 0.3.1
 
 - Route standalone continuation requests such as `继续` and `continue` to

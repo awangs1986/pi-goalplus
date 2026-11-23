@@ -1,6 +1,14 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export type GoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+export const GOAL_STATUS_LABELS = {
+  active: "Active",
+  paused: "Paused",
+  blocked: "Blocked",
+  usageLimited: "Usage limited",
+  budgetLimited: "Budget exhausted",
+  complete: "Complete"
+} as const;
+export type GoalStatus = keyof typeof GOAL_STATUS_LABELS;
 
 export interface Criterion {
   id: string;

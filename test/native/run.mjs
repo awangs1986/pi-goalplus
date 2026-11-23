@@ -104,6 +104,7 @@ function strip(rpc, patterns) {
 async function resumeAfterFailure(installed) {
   let scope, a;
   let resuming = false;
+  const privateErrorDetail = "fixture-private-provider-detail";
   const before = [
     readGoal,
     body => { scope = readScope(body); return planTasks(scope); },
@@ -112,7 +113,7 @@ async function resumeAfterFailure(installed) {
     () => write("a.txt", "verified-a"),
     () => read("a.txt"),
     body => checkpoint(scope, "Verified A", [verified("A", "pass", body, "verified-a"), unverified[1]], 1),
-    () => ({ error: 400, message: "Fixture interrupted the agent after task one" }),
+    () => ({ error: 400, message: `Fixture interrupted the agent after task one: ${privateErrorDetail}` }),
   ];
   const after = [
     readGoal,
@@ -150,6 +151,10 @@ async function resumeAfterFailure(installed) {
   try {
     const fixture = await rpcFixture(join(scratch, "resume-failure"), installed.cli, installed.packages, server.baseUrl);
     rpc = fixture.launch();
+    await rpc.command("prompt", { message: "/goal logs" });
+    await until(() => rpc.events.find(event => event.method === "notify" && event.message?.includes("No diagnostic events")),
+      "empty Goal log before any work");
+    assert.equal(rpc.events.some(event => event.type === "agent_start"), false);
     await rpc.command("prompt", { message: "继续" });
     await until(() => rpc.events.some(event => event.type === "agent_settled"), "ordinary prompt without a Goal");
     assert.ok(!strip(rpc, [/Validate both/]), "plain input must not create a new Goal");
@@ -159,6 +164,21 @@ async function resumeAfterFailure(installed) {
       server.assertHealthy();
       return strip(rpc, [/\[Blocked\]/, /Task 2\/2/]);
     }, "saved task after native provider interruption");
+    await rpc.close();
+    rpc = fixture.launch();
+    await rpc.command("get_state");
+    await rpc.command("prompt", { message: "/goal logs" });
+    const diagnostic = await until(() => rpc.events.find(event => event.type === "extension_error" ||
+      (event.method === "notify" && event.message?.startsWith("Goal logs"))), "Goal logs after reopening the failed run");
+    assert.equal(diagnostic.method, "notify");
+    assert.match(diagnostic.message, /Task 2\/2.*Provider.*HTTP 400.*Blocked/i);
+    assert.doesNotMatch(diagnostic.message, new RegExp(privateErrorDetail));
+    await rpc.command("prompt", { message: "/goal logs 1" });
+    const latest = await until(() => rpc.events.find(event => event !== diagnostic && event.method === "notify" &&
+      event.message?.startsWith("Goal logs")), "one diagnostic event");
+    assert.equal(latest.message.split("\n").length, 2);
+    assert.match(latest.message, /HTTP 400/);
+    assert.equal(rpc.events.some(event => event.type === "agent_start"), false);
     resuming = true;
     await rpc.command("prompt", { message: "继续" });
     await until(() => {
@@ -168,6 +188,7 @@ async function resumeAfterFailure(installed) {
     assert.equal(before.length + after.length, 0);
     assert.equal(await readFile(join(fixture.cwd, "b.txt"), "utf8"), "verified-b");
     console.log('PASS native Goal resumes the same objective, revision and next task after a provider interruption and "继续"');
+    console.log("PASS /goal logs shows the saved failed task and HTTP status without provider response text");
   } finally {
     if (rpc) await rpc.close();
     await server.close();
@@ -232,6 +253,13 @@ async function compactBeforeNextTask(installed, { key = "early-compact", usage =
     }, "Goal completion after proactive compaction");
     const entries = (await readFile(fixture.session, "utf8")).trim().split("\n").map(line => JSON.parse(line));
     assert.equal(entries.filter(entry => entry.type === "compaction").length, expected ? 1 : 0);
+    if (expected) {
+      await rpc.command("prompt", { message: "/goal logs" });
+      const logs = await until(() => rpc.events.find(event => event.method === "notify" &&
+        event.message?.startsWith("Goal logs")), "Goal compaction diagnostics");
+      assert.match(logs.message, /Context compaction started.*early/);
+      assert.match(logs.message, /Context compaction saved.*early/);
+    }
     assert.equal(actions.length, 0);
     assert.equal(await readFile(join(fixture.cwd, "b.txt"), "utf8"), "verified-b");
     console.log(expected ? "PASS native Goal compacts above 70% before risky work and resumes the saved task" :

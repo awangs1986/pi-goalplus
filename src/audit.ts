@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { recordGoalLog } from "./logs.js";
 import { decodeTaskPlan, MAX_TASKS, MAX_TASK_TITLE_LENGTH, MIN_TASKS } from "./store.js";
 import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
 import type { ConstraintReview, Evidence, Goal, GoalRunner, GoalStore } from "./types.js";
@@ -391,7 +392,10 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
         auditedRunId: runId,
         completionRunId: undefined
       });
-      if (taskCompleted !== undefined) requireFreshRead(state);
+      if (taskCompleted !== undefined) {
+        recordGoalLog(pi, ctx, goal, "taskAdvanced");
+        requireFreshRead(state);
+      }
       const compact = (taskCompleted !== undefined || next !== undefined || args.nextStageTokens !== undefined) &&
         runner.beforeNextStage(ctx, args.nextStageTokens);
       return { ...toolOutput({
@@ -453,13 +457,15 @@ export function registerGoalTools(pi: ExtensionAPI, store: GoalStore, runner: Go
       const { goal } = current(ctx, args);
       const reason = nonBlank(args.reason, "Identify what must change before work can continue.");
       const evidence = nonBlank(args.evidence, "Provide the evidence that blocks further work.");
-      store.write(ctx, {
+      const blocked = {
         ...goal,
         status: "blocked",
         reason: `[${args.dependency}] ${reason} Evidence: ${evidence}`,
         auditedRunId: undefined,
         completionRunId: undefined
-      });
+      } as const;
+      store.write(ctx, blocked);
+      recordGoalLog(pi, ctx, blocked, "dependency", { dependency: args.dependency });
       return toolOutput({ status: "blocked", dependency: args.dependency, reason });
     }
   });
