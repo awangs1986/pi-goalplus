@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GoalStateError, MAX_CRITERION_TEXT_LENGTH, parseGoalDefinition } from "./store.js";
 import type { Goal, GoalDefinition, GoalRunner, GoalStore } from "./types.js";
 
 const widgetKey = "pi-goalplus";
 const usage = "/goal <objective> or /goal start <JSON>; /goal status, edit, pause, stop, resume, clear.";
+const resumeInput = /^(?:resume|continue|继续)[.!?。！？]*$/i;
 const labels = {
   active: "Active",
   paused: "Paused",
@@ -162,7 +163,7 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
   };
 
   async function reviewDefinition(
-    ctx: ExtensionCommandContext,
+    ctx: ExtensionContext,
     draft: GoalDefinition,
     editing: boolean
   ): Promise<GoalDefinition | undefined> {
@@ -206,6 +207,39 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
     }
   }
 
+  async function resumeGoal(ctx: ExtensionContext, goal: Goal): Promise<void> {
+    if (goal.status === "complete") throw Error("The Goal is complete. Start a new Goal or edit its definition.");
+    if (goal.status === "budgetLimited") throw Error("Increase or remove the Goal budget with /goal edit before resuming.");
+    if (goal.status === "active") {
+      runner.request(ctx);
+      return;
+    }
+    requireIdle(ctx);
+    if (goal.dispatch) throw Error("The previous Goal dispatch has not settled.");
+    if (goal.needsReview) {
+      const { objective, constraints, criteria, budgetTokens } = goal;
+      const reviewed = await reviewDefinition(ctx, { objective, constraints, criteria, budgetTokens }, false);
+      if (!reviewed) return;
+      store.write(ctx, initialGoal(reviewed), "user-confirmed");
+    } else {
+      store.write(ctx, { ...goal, status: "active", reason: undefined, noProgress: 0, consecutiveFailures: 0 });
+    }
+    runner.request(ctx);
+  }
+
+  pi.on("input", async (event, ctx) => {
+    if ((ctx.mode !== "tui" && ctx.mode !== "rpc") || event.source === "extension" ||
+        event.images?.length || !resumeInput.test(event.text.trim())) return;
+    try {
+      const goal = store.read(ctx);
+      if (!goal || goal.status === "complete") return;
+      await resumeGoal(ctx, goal);
+    } catch (error) {
+      notify(ctx, error instanceof Error ? error.message : "GoalPlus could not resume the saved Goal.");
+    }
+    return { action: "handled" };
+  });
+
   pi.registerCommand("goal", {
     description: "Create, inspect and control a persistent Goal",
     handler: async (input, ctx) => {
@@ -237,24 +271,8 @@ export function registerGoalCommands(pi: ExtensionAPI, store: GoalStore, runner:
         return;
       }
 
-      if (args === "resume") {
-        const goal = getGoal(ctx);
-        if (goal.status === "active") return;
-        if (goal.needsReview) {
-          requireIdle(ctx);
-          const { objective, constraints, criteria, budgetTokens } = goal;
-          const reviewed = await reviewDefinition(ctx, { objective, constraints, criteria, budgetTokens }, false);
-          if (!reviewed) return;
-          store.write(ctx, initialGoal(reviewed), "user-confirmed");
-          runner.request(ctx);
-          return;
-        }
-        if (goal.status === "complete") throw Error("The Goal is complete. Start a new Goal or edit its definition.");
-        if (goal.status === "budgetLimited") throw Error("Increase or remove the Goal budget with /goal edit before resuming.");
-        requireIdle(ctx);
-        if (goal.dispatch) throw Error("The previous Goal dispatch has not settled.");
-        store.write(ctx, { ...goal, status: "active", reason: undefined, noProgress: 0, consecutiveFailures: 0 });
-        runner.request(ctx);
+      if (resumeInput.test(args)) {
+        await resumeGoal(ctx, getGoal(ctx));
         return;
       }
 

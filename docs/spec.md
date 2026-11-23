@@ -23,9 +23,10 @@ history branch's Goal.
 
 Pause prevents additional turns and allows the in-flight work to settle. Stop
 persists the pause before cancelling the active Goal run or proactive native
-compaction. Resume uses the
-previous requirements and evidence. Clear retires the Goal and keeps the
-conversation and project files.
+compaction. `/goal resume`, or a standalone `继续` or `continue` in the same
+session, resumes the eligible saved Goal. The control uses the original
+requirements, evidence and unfinished task. Clear retires the Goal and keeps
+the conversation and project files.
 
 ## Automatic continuation
 
@@ -107,6 +108,7 @@ Pi history.
 | Compaction | Native compression preserves the Goal and task plan. Resumed work rereads the original requirements and current evidence before aligning the task. |
 | Proactive compaction | A stage forecast that reaches the remaining capacity triggers native compaction above 70%. At 70% or with enough space, the next stage proceeds directly. |
 | Recovery | On pause, stop, resume and reopen, Goal state follows the active session branch. Uncertain work is not silently repeated. |
+| Resume after interruption | A standalone `继续` resumes the saved goal at its unfinished task. The objective, revision and verified progress remain available. |
 | Limits | Provider limits and explicitly configured token budgets display the cause. Goal completion is independent of both. |
 
 Use the published Pi extension and RPC seams for deterministic tests. Live model

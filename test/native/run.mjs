@@ -22,6 +22,7 @@ const tasks = [
 const unverified = goal.criteria.map(({ id }) => ({ id, state: "reopen" }));
 try {
   const installed = await install();
+  await resumeAfterFailure(installed);
   await compactBeforeNextTask(installed);
   await compactBeforeNextTask(installed, { key: "at-70-percent", usage: 44_797, estimate: 30_000, expected: false });
   await compactBeforeNextTask(installed, { key: "enough-space", usage: 47_000, estimate: 2_000, expected: false });
@@ -98,6 +99,79 @@ function verified(id, state, body, observed) {
 function strip(rpc, patterns) {
   return rpc.events.find(event => event.type === "extension_ui_request" && event.method === "setWidget" &&
     patterns.every(pattern => pattern.test(JSON.stringify(event))));
+}
+
+async function resumeAfterFailure(installed) {
+  let scope, a;
+  let resuming = false;
+  const before = [
+    readGoal,
+    body => { scope = readScope(body); return planTasks(scope); },
+    readGoal,
+    () => alignTask(scope, 1),
+    () => write("a.txt", "verified-a"),
+    () => read("a.txt"),
+    body => checkpoint(scope, "Verified A", [verified("A", "pass", body, "verified-a"), unverified[1]], 1),
+    () => ({ error: 400, message: "Fixture interrupted the agent after task one" }),
+  ];
+  const after = [
+    readGoal,
+    body => {
+      const resumed = JSON.parse(lastTool(body).text);
+      assert.equal(resumed.goalId, scope.goalId);
+      assert.equal(resumed.revision, scope.revision);
+      assert.notEqual(resumed.runId, scope.runId);
+      assert.equal(resumed.objective, goal.objective);
+      assert.deepEqual(resumed.plan, { tasks, completed: 1 });
+      assert.ok(resumed.evidence.some(item => item.criterionId === "A" && item.verdict === "pass"));
+      scope = readScope(body);
+      return alignTask(scope, 2);
+    },
+    () => write("b.txt", "verified-b"),
+    () => read("a.txt"),
+    body => { a = verified("A", "pass", body, "verified-a"); return read("b.txt"); },
+    body => checkpoint(scope, "Verified both fixtures", [a, verified("B", "pass", body, "verified-b")]),
+    () => ({ tool: "goalplus_complete", args: scope }),
+    () => ({ text: "Both tasks verified." }),
+  ];
+  const server = await modelServer(body => {
+    if (!resuming && !toolNames(body).includes("goalplus_read")) return { text: "Ordinary Pi response." };
+    assert.ok(toolNames(body).includes("goalplus_read"), '"继续" must resume the saved Goal with its tools');
+    if (resuming) {
+      const continuationInputs = body.messages.filter(message => message.role === "user" &&
+        JSON.stringify(message.content).includes('"继续"'));
+      assert.equal(continuationInputs.length, 1, '"继续" during recovery must be consumed as a Goal control');
+    }
+    const action = (resuming ? after : before).shift();
+    assert.ok(action, "unexpected Goal continuation");
+    return action(body);
+  });
+  let rpc;
+  try {
+    const fixture = await rpcFixture(join(scratch, "resume-failure"), installed.cli, installed.packages, server.baseUrl);
+    rpc = fixture.launch();
+    await rpc.command("prompt", { message: "继续" });
+    await until(() => rpc.events.some(event => event.type === "agent_settled"), "ordinary prompt without a Goal");
+    assert.ok(!strip(rpc, [/Validate both/]), "plain input must not create a new Goal");
+
+    await rpc.command("prompt", { message: "/goal start " + JSON.stringify(goal) });
+    await until(() => {
+      server.assertHealthy();
+      return strip(rpc, [/\[Blocked\]/, /Task 2\/2/]);
+    }, "saved task after native provider interruption");
+    resuming = true;
+    await rpc.command("prompt", { message: "继续" });
+    await until(() => {
+      server.assertHealthy();
+      return strip(rpc, [/\[Complete\]/, /Task 2\/2/]);
+    }, "completed original Goal after sending 继续");
+    assert.equal(before.length + after.length, 0);
+    assert.equal(await readFile(join(fixture.cwd, "b.txt"), "utf8"), "verified-b");
+    console.log('PASS native Goal resumes the same objective, revision and next task after a provider interruption and "继续"');
+  } finally {
+    if (rpc) await rpc.close();
+    await server.close();
+  }
 }
 
 async function compactBeforeNextTask(installed, { key = "early-compact", usage = 47_000, estimate, expected = true } = {}) {

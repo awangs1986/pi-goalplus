@@ -5,6 +5,7 @@ import { isGoalTool, isNativeReadOnly } from "./tool-policy.js";
 import type { Dispatch, Goal, GoalRunner, GoalStore } from "./types.js";
 
 const TRIGGER = "pi-goalplus-run";
+const GOAL_DISPATCH = "GoalPlus control message. Call goalplus_read first to get the original objective and requirements, then work on the saved unfinished task. Check existing results before repeating any interrupted step.";
 const NO_PROGRESS_LIMIT = 3;
 const SAFE_RETRY_DELAYS = [250, 1000];
 const RECENT_PROGRESS_LIMIT = 128;
@@ -329,7 +330,7 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
     const newSession = ctx.sessionManager.getSessionFile() !== undefined &&
       !ctx.sessionManager.getEntries().some(entry => entry.type === "message" &&
         (entry.message.role === "user" || entry.message.role === "assistant"));
-    const initialPrompt = newSession ? `Start the confirmed Goal.\n\nGoalPlus dispatch ${id}` : undefined;
+    const initialPrompt = newSession ? `${GOAL_DISPATCH}\n\nGoalPlus dispatch ${id}` : undefined;
     store.write(ctx, {
       ...goal,
       ownerSessionId: sessionId,
@@ -349,15 +350,13 @@ export function registerGoalRunner(pi: ExtensionAPI, store: GoalStore): GoalRunn
         pi.sendUserMessage(initialPrompt, { deliverAs: "followUp", expandPromptTemplates: false });
         return;
       }
-      const instruction = goal.noProgress > 0
-        ? "Continue the confirmed Goal using a different approach. Read it before acting, then make concrete progress or identify a blocker."
-        : "Continue the confirmed Goal. Read it before acting and audit the stage against the original requirements.";
+      const retry = goal.noProgress > 0 ? " Use a different approach to make concrete progress or identify a blocker." : "";
       const reconcile = goal.auditPending ? " The previous run ended without a current audit. Read the Goal and record a checkpoint before advancing." : "";
       pi.sendMessage({
         customType: TRIGGER,
         display: false,
         details: { id },
-        content: instruction + reconcile,
+        content: GOAL_DISPATCH + retry + reconcile,
       }, { triggerTurn: true, deliverAs: "followUp" });
     } catch {
       abandonStart(ctx, candidate);

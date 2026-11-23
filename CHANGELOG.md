@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Route standalone continuation requests such as `继续` and `continue` to
+  Goal resumption. Resume from the original objective and saved task after
+  interruptions.
+
 ## 0.3.0
 
 - Request native Pi compaction before the next Goal stage when context usage

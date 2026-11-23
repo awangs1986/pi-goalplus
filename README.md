@@ -38,7 +38,7 @@ progress survive compaction and session reopen.
 | `/goal edit` or `/goal edit <JSON>` | Confirm or explicitly submit a new revision of the saved requirements. |
 | `/goal pause` | Let the current run settle and pause new Goal turns. |
 | `/goal stop` | Pause the Goal and cancel its current Pi run or proactive compaction. |
-| `/goal resume` | Continue the saved Goal when eligible. |
+| `/goal resume`, `继续`, or `continue` | Resume the saved Goal from its unfinished task. |
 | `/goal clear` | Clear the Goal while keeping native conversation history and workspace files. |
 
 An approved JSON definition has an `objective`, `constraints`, and a nonempty
@@ -55,6 +55,9 @@ successive runs. RPC clients receive the standard `setWidget` and `notify`
 extension UI frames. Record which native Pi session to reopen if you stop the
 process. A Goal can continue when Pi can confirm the previous work settled.
 An uncertain in-flight run needs review before you explicitly resume it.
+Send a standalone continuation request in the same session. GoalPlus resumes
+with the original requirements and the current task. Without an unfinished
+Goal, standalone continuation text follows the normal Pi input path.
 Use one live Pi process per session. Third-party asynchronous work that returns
 control to Pi before it finishes needs its own completion signal or a paused
 Goal.
